@@ -8,6 +8,7 @@
 #define drgn_StackTrace_prog_DOC "TODO"
 #define drgn_StackFrame_DOC "TODO"
 #define drgn_StackFrame_pc_DOC "TODO"
+#define drgn_StackFrame_register_DOC "TODO"
 #define drgn_StackFrame_symbol_DOC "TODO"
 
 static inline Program *StackTrace_prog(StackTrace *trace)
@@ -118,6 +119,24 @@ static void StackFrame_dealloc(StackFrame *self)
 	Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
+static PyObject *StackFrame_register(StackFrame *self, PyObject *args,
+				     PyObject *kwds)
+{
+	static char *keywords[] = { "name", NULL, };
+	struct drgn_error *err;
+	const char *name;
+	uint64_t value;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "s:register", keywords,
+					 &name))
+		return NULL;
+
+	err = drgn_stack_frame_register(self->frame, name, &value);
+	if (err)
+		return set_drgn_error(err);
+	return PyLong_FromUnsignedLongLong(value);
+}
+
 static PyObject *StackFrame_get_pc(StackFrame *self, void *arg)
 {
 	return PyLong_FromUnsignedLongLong(drgn_stack_frame_pc(self->frame));
@@ -128,6 +147,12 @@ static Symbol *StackFrame_get_symbol(StackFrame *self, void *arg)
 	return Program_find_symbol(StackTrace_prog(self->trace_obj),
 				   drgn_stack_frame_pc(self->frame));
 }
+
+static PyMethodDef StackFrame_methods[] = {
+	{"register", (PyCFunction)StackFrame_register,
+	 METH_VARARGS | METH_KEYWORDS, drgn_StackFrame_register_DOC},
+	{},
+};
 
 static PyGetSetDef StackFrame_getset[] = {
 	{"pc", (getter)StackFrame_get_pc, NULL, drgn_StackFrame_pc_DOC},
@@ -164,7 +189,7 @@ PyTypeObject StackFrame_type = {
 	0,					/* tp_weaklistoffset */
 	NULL,					/* tp_iter */
 	NULL,					/* tp_iternext */
-	NULL,					/* tp_methods */
+	StackFrame_methods,			/* tp_methods */
 	NULL,					/* tp_members */
 	StackFrame_getset,			/* tp_getset */
 };

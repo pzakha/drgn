@@ -2222,6 +2222,10 @@ struct drgn_error *drgn_pretty_print_stack_trace(struct drgn_stack_trace *trace,
 
 uint64_t drgn_stack_frame_pc(struct drgn_stack_frame *frame);
 
+struct drgn_error *
+drgn_stack_frame_register(struct drgn_stack_frame *frame,
+			  const char *name, uint64_t *ret);
+
 struct drgn_error *drgn_stack_frame_symbol(struct drgn_stack_frame *frame,
 					   struct drgn_symbol **ret);
 

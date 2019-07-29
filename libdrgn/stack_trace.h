@@ -10,6 +10,8 @@
 struct drgn_stack_frame {
 	struct drgn_stack_trace *trace;
 	uint64_t pc;
+	uint64_t regs_set[3];
+	uint64_t *regs;
 };
 
 struct drgn_stack_trace {

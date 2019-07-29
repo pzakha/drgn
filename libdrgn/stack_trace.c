@@ -89,6 +89,52 @@ LIBDRGN_PUBLIC uint64_t drgn_stack_frame_pc(struct drgn_stack_frame *frame)
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
+drgn_stack_frame_register(struct drgn_stack_frame *frame,
+			  const char *name, uint64_t *ret)
+{
+	/* XXX: this is architecture-specific. */
+	static const char * const names[] = {
+		"rax",
+		"rdx",
+		"rcx",
+		"rbx",
+		"rsi",
+		"rdi",
+		"rbp",
+		"rsp",
+		"r8",
+		"r9",
+		"r10",
+		"r11",
+		"r12",
+		"r13",
+		"r14",
+		"r15",
+		"ret_addr",
+	};
+	size_t i;
+
+	if (strcmp(name, "rip") == 0) {
+		*ret = frame->pc;
+		return NULL;
+	}
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		if (strcmp(name, names[i]) == 0) {
+			if (frame->regs_set[i / 64] & (1 << (i % 64))) {
+				*ret = frame->regs[i];
+				return NULL;
+			} else {
+				return drgn_error_format(DRGN_ERROR_OTHER,
+							 "%s value is not known at 0x%" PRIx64,
+							 name, frame->pc);
+			}
+		}
+	}
+	return drgn_error_format(DRGN_ERROR_OTHER, "no register named %s",
+				 name);
+}
+
+LIBDRGN_PUBLIC struct drgn_error *
 drgn_stack_frame_symbol(struct drgn_stack_frame *frame,
 			struct drgn_symbol **ret)
 {
@@ -160,16 +206,64 @@ struct drgn_append_stack_frame_arg {
 	size_t capacity;
 };
 
-static int drgn_append_stack_frame(Dwfl_Frame *frame, void *_arg)
+/*
+ * XXX: this is awful, but libdwfl doesn't have a supported way to get at the
+ * registers.
+ */
+struct Dwfl_Frame
+{
+  Dwfl_Thread *thread;
+  /* Previous (outer) frame.  */
+  Dwfl_Frame *unwound;
+  bool signal_frame : 1;
+  bool initial_frame : 1;
+  enum
+  {
+    /* This structure is still being initialized or there was an error
+       initializing it.  */
+    DWFL_FRAME_STATE_ERROR,
+    /* PC field is valid.  */
+    DWFL_FRAME_STATE_PC_SET,
+    /* PC field is undefined, this means the next (inner) frame was the
+       outermost frame.  */
+    DWFL_FRAME_STATE_PC_UNDEFINED
+  } pc_state;
+  /* Either initialized from appropriate REGS element or on some archs
+     initialized separately as the return address has no DWARF register.  */
+  Dwarf_Addr pc;
+  /* (1 << X) bitmask where 0 <= X < ebl_frame_nregs.  */
+  uint64_t regs_set[3];
+  /* REGS array size is ebl_frame_nregs.
+     REGS_SET tells which of the REGS are valid.  */
+  Dwarf_Addr regs[];
+};
+
+static int drgn_append_stack_frame(Dwfl_Frame *dwfl_frame, void *_arg)
 {
 	struct drgn_error *err;
 	struct drgn_append_stack_frame_arg *arg = _arg;
 	struct drgn_stack_trace *trace = arg->trace;
 	struct drgn_program *prog = trace->prog;
+	size_t i, j, num_regs;
 	Dwarf_Addr pc;
+	uint64_t *regs;
+	struct drgn_stack_frame *frame;
 
-	if (!dwfl_frame_pc(frame, &pc, NULL)) {
+	if (!dwfl_frame_pc(dwfl_frame, &pc, NULL)) {
 		err = drgn_error_libdwfl();
+		goto err;
+	}
+	num_regs = 0;
+	for (i = 0; i < 3; i++) {
+		for (j = 0; j < 64; j++) {
+			/* XXX */
+			if (dwfl_frame->regs_set[i] & (1 << j))
+				num_regs = 64 * i + j;
+		}
+	}
+	regs = malloc_array(num_regs, sizeof(*regs));
+	if (!regs) {
+		err = &drgn_enomem;
 		goto err;
 	}
 
@@ -181,13 +275,18 @@ static int drgn_append_stack_frame(Dwfl_Frame *frame, void *_arg)
 					   sizeof(trace->frames[0]), &bytes) ||
 		    __builtin_add_overflow(bytes, sizeof(*trace), &bytes) ||
 		    !(trace = realloc(trace, bytes))) {
+			free(regs);
 			err = &drgn_enomem;
 			goto err;
 		}
 		arg->trace = trace;
 		arg->capacity = new_capacity;
 	}
-	trace->frames[trace->num_frames++].pc = pc;
+	frame = &trace->frames[trace->num_frames++];
+	frame->pc = pc;
+	memcpy(frame->regs_set, dwfl_frame->regs_set, sizeof(frame->regs_set));
+	memcpy(regs, dwfl_frame->regs, num_regs * sizeof(*regs));
+	frame->regs = regs;
 	return DWARF_CB_OK;
 
 err:
