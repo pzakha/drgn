@@ -670,16 +670,39 @@ static DrgnObject *Program_variable(Program *self, PyObject *args,
 				   DRGN_FIND_OBJECT_VARIABLE);
 }
 
-static Symbol *Program_symbol(Program *self, PyObject *args, PyObject *kwds)
+static StackTrace *Program_stack_trace(Program *self, PyObject *args,
+				       PyObject *kwds)
 {
-	static char *keywords[] = {"address", NULL};
+	static char *keywords[] = {"task", NULL};
 	struct drgn_error *err;
-	unsigned long long address;
+	DrgnObject *task;
+	struct drgn_stack_trace *trace;
+	StackTrace *trace_obj;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!:stack_trace", keywords,
+					 &DrgnObject_type, &task))
+		return NULL;
+
+	err = drgn_object_stack_trace(&task->obj, &trace);
+	if (err) {
+		set_drgn_error(err);
+		return NULL;
+	}
+	trace_obj = (StackTrace *)StackTrace_type.tp_alloc(&StackTrace_type, 0);
+	if (!trace_obj) {
+		drgn_stack_trace_destroy(trace);
+		return NULL;
+	}
+	trace_obj->trace = trace;
+	Py_INCREF(self);
+	return trace_obj;
+}
+
+Symbol *Program_find_symbol(Program *self, uint64_t address)
+{
+	struct drgn_error *err;
 	struct drgn_symbol *sym;
 	Symbol *ret;
-
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "K", keywords, &address))
-		return NULL;
 
 	err = drgn_program_find_symbol(&self->prog, address, &sym);
 	if (err)
@@ -693,6 +716,16 @@ static Symbol *Program_symbol(Program *self, PyObject *args, PyObject *kwds)
 	ret->prog = self;
 	Py_INCREF(self);
 	return ret;
+}
+
+static Symbol *Program_symbol(Program *self, PyObject *args, PyObject *kwds)
+{
+	static char *keywords[] = {"address", NULL};
+	unsigned long long address;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "K", keywords, &address))
+		return NULL;
+	return Program_find_symbol(self, address);
 }
 
 static DrgnObject *Program_subscript(Program *self, PyObject *key)
@@ -785,6 +818,8 @@ static PyObject *Program_get_platform(Program *self, void *arg)
 		Py_RETURN_NONE;
 }
 
+#define drgn_Program_stack_trace_DOC "TODO"
+
 static PyMethodDef Program_methods[] = {
 	{"add_memory_segment", (PyCFunction)Program_add_memory_segment,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_add_memory_segment_DOC},
@@ -819,6 +854,8 @@ static PyMethodDef Program_methods[] = {
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_function_DOC},
 	{"variable", (PyCFunction)Program_variable,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_variable_DOC},
+	{"stack_trace", (PyCFunction)Program_stack_trace,
+	 METH_VARARGS | METH_KEYWORDS, drgn_Program_stack_trace_DOC},
 	{"symbol", (PyCFunction)Program_symbol, METH_VARARGS | METH_KEYWORDS,
 	 drgn_Program_symbol_DOC},
 	{},

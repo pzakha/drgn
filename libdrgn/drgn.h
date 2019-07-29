@@ -2205,6 +2205,29 @@ struct drgn_error *drgn_object_sizeof(const struct drgn_object *obj,
 
 /** @} */
 
+/* TODO: defgroup, documentation */
+
+struct drgn_stack_trace;
+struct drgn_stack_frame;
+
+void drgn_stack_trace_destroy(struct drgn_stack_trace *trace);
+
+size_t drgn_stack_trace_num_frames(struct drgn_stack_trace *trace);
+
+struct drgn_stack_frame *drgn_stack_trace_frame(struct drgn_stack_trace *trace,
+						size_t i);
+
+struct drgn_error *drgn_pretty_print_stack_trace(struct drgn_stack_trace *trace,
+						 char **ret);
+
+uint64_t drgn_stack_frame_pc(struct drgn_stack_frame *frame);
+
+struct drgn_error *drgn_stack_frame_symbol(struct drgn_stack_frame *frame,
+					   struct drgn_symbol **ret);
+
+struct drgn_error *drgn_object_stack_trace(const struct drgn_object *obj,
+					   struct drgn_stack_trace **ret);
+
 /** @} */
 
 /**
