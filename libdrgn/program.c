@@ -50,6 +50,12 @@ drgn_program_platform(struct drgn_program *prog)
 	return prog->has_platform ? &prog->platform : NULL;
 }
 
+LIBDRGN_PUBLIC const struct drgn_language *
+drgn_program_language(struct drgn_program *prog)
+{
+	return drgn_language_or_default(prog->lang);
+}
+
 void drgn_program_set_platform(struct drgn_program *prog,
 			       const struct drgn_platform *platform)
 {
@@ -410,6 +416,8 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 						     prog);
 		if (err)
 			goto out_segments;
+		if (!prog->lang)
+			prog->lang = &drgn_language_c;
 	}
 
 	drgn_program_set_platform(prog, &platform);
@@ -536,6 +544,29 @@ struct drgn_error *drgn_program_get_dwfl(struct drgn_program *prog, Dwfl **ret)
 	return NULL;
 }
 
+/* Set the default language from the language of "main". */
+static struct drgn_error *
+drgn_program_set_language_from_main(struct drgn_program *prog)
+{
+	struct drgn_error *err;
+	struct drgn_object res;
+
+	drgn_object_init(&res, prog);
+	err = drgn_program_find_object(prog, "main", NULL, DRGN_FIND_OBJECT_ANY,
+				       &res);
+	if (err) {
+		if (err->code == DRGN_ERROR_LOOKUP) {
+			/* We couldn't find "main". Don't set the language. */
+			drgn_error_destroy(err);
+			err = NULL;
+		}
+	} else {
+		prog->lang = drgn_type_language(res.type);
+	}
+	drgn_object_deinit(&res);
+	return err;
+}
+
 static struct drgn_error *
 userspace_report_debug_info(struct drgn_program *prog,
 			    struct drgn_dwarf_index *dindex,
@@ -582,6 +613,12 @@ userspace_report_debug_info(struct drgn_program *prog,
 						 NULL) == -1) {
 			return drgn_error_libdwfl();
 		}
+	}
+
+	if (!prog->lang) {
+		err = drgn_program_set_language_from_main(prog);
+		if (err)
+			return err;
 	}
 	return NULL;
 }
@@ -647,16 +684,45 @@ drgn_program_load_debug_info(struct drgn_program *prog, const char **paths,
 	return err;
 }
 
-static struct drgn_error *drgn_program_cache_prstatus(struct drgn_program *prog)
+struct drgn_error *drgn_program_cache_prstatus_entry(struct drgn_program *prog,
+						     char *data, size_t size)
 {
-	size_t phnum, i;
+	struct drgn_prstatus_map_entry entry;
 	size_t pr_pid_offset;
+	uint32_t pr_pid;
 	bool bswap;
 
 	pr_pid_offset = drgn_program_is_64_bit(prog) ? 32 : 24;
 	bswap = (drgn_program_is_little_endian(prog) !=
 		 (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__));
 
+	if (size < pr_pid_offset + sizeof(pr_pid))
+		return NULL;
+
+	memcpy(&pr_pid, data + pr_pid_offset, sizeof(pr_pid));
+	if (bswap)
+		pr_pid = bswap_32(pr_pid);
+	if (!pr_pid)
+		return NULL;
+
+	entry.key = pr_pid;
+	entry.value.str = data;
+	entry.value.len = size;
+	if (drgn_prstatus_map_insert(&prog->prstatus_cache, &entry,
+				     NULL) == -1) {
+		return &drgn_enomem;
+	}
+	return NULL;
+}
+
+static struct drgn_error *drgn_program_cache_prstatus(struct drgn_program *prog)
+{
+	size_t phnum, i;
+
+#ifdef WITH_LIBKDUMPFILE
+	if (prog->kdump_ctx)
+		return drgn_program_cache_prstatus_kdump(prog);
+#endif
 	if (elf_getphdrnum(prog->core, &phnum) != 0)
 		return drgn_error_libelf();
 	for (i = 0; i < phnum; i++) {
@@ -683,28 +749,18 @@ static struct drgn_error *drgn_program_cache_prstatus(struct drgn_program *prog)
 		       (offset = gelf_getnote(data, offset, &nhdr, &name_offset,
 					      &desc_offset))) {
 			const char *name;
-			uint32_t pr_pid;
-			struct drgn_prstatus_map_entry entry;
+			struct drgn_error *err;
 
 			name = (char *)data->d_buf + name_offset;
 			if (strncmp(name, "CORE", nhdr.n_namesz) != 0 ||
-			    nhdr.n_type != NT_PRSTATUS ||
-			    nhdr.n_descsz < pr_pid_offset + sizeof(pr_pid))
-				continue;
-			memcpy(&pr_pid,
-			       (char *)data->d_buf + desc_offset + pr_pid_offset,
-			       sizeof(pr_pid));
-			if (bswap)
-				pr_pid = bswap_32(pr_pid);
-			if (!pr_pid)
+			    nhdr.n_type != NT_PRSTATUS)
 				continue;
 
-			entry.key = pr_pid;
-			entry.value.str = (char *)data->d_buf + desc_offset;
-			entry.value.len = nhdr.n_descsz;
-			if (drgn_prstatus_map_insert(&prog->prstatus_cache,
-						     &entry, NULL) == -1)
-				return &drgn_enomem;
+			err = drgn_program_cache_prstatus_entry(prog,
+								(char *)data->d_buf + desc_offset,
+								nhdr.n_descsz);
+			if (err)
+				return err;
 		}
 	}
 	return NULL;
@@ -896,7 +952,7 @@ drgn_program_find_type(struct drgn_program *prog, const char *name,
 		       const char *filename, struct drgn_qualified_type *ret)
 {
 	return drgn_type_index_find(&prog->tindex, name, filename,
-				    &drgn_language_c, ret);
+				    drgn_program_language(prog), ret);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *

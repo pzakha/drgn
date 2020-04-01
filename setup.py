@@ -119,10 +119,8 @@ class build_ext(_build_ext):
 class egg_info(_egg_info):
     def run(self):
         if os.path.exists(".git"):
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.remove(os.path.join(self.egg_info, "SOURCES.txt"))
-            except FileNotFoundError:
-                pass
         super().run()
 
 
@@ -180,7 +178,8 @@ with open("README.rst", "r") as f:
 setup(
     name="drgn",
     version=get_version(),
-    packages=find_packages(exclude=["examples", "scripts", "tests", "tests.*"]),
+    packages=find_packages(include=["drgn", "drgn.*"]),
+    package_data={"drgn": ["../_drgn.pyi", "py.typed"]},
     # This is here so that setuptools knows that we have an extension; it's
     # actually built using autotools/make.
     ext_modules=[Extension(name="_drgn", sources=[])],

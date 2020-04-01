@@ -1,4 +1,4 @@
-// Copyright 2018-2019 - Omar Sandoval
+// Copyright 2018-2020 - Omar Sandoval
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "drgnpy.h"
@@ -134,9 +134,7 @@ static PyMethodDef drgn_methods[] = {
 static struct PyModuleDef drgnmodule = {
 	PyModuleDef_HEAD_INIT,
 	"_drgn",
-"libdrgn bindings\n"
-"\n"
-"Don't use this module directly. Instead, use the drgn package.",
+	drgn_DOC,
 	-1,
 	drgn_methods,
 };
@@ -173,6 +171,13 @@ DRGNPY_PUBLIC PyMODINIT_FUNC PyInit__drgn(void)
 	if (!OutOfBoundsError)
 		goto err;
 	PyModule_AddObject(m, "OutOfBoundsError", OutOfBoundsError);
+
+	if (PyType_Ready(&Language_type) < 0)
+		goto err;
+	Py_INCREF(&Language_type);
+	PyModule_AddObject(m, "Language", (PyObject *)&Language_type);
+	if (add_languages() == -1)
+		goto err;
 
 	if (PyStructSequence_InitType2(&Register_type, &Register_desc) == -1)
 		goto err;

@@ -1,11 +1,14 @@
 import os.path
+import re
 import tempfile
 import unittest
 
 from drgn import (
     FindObjectFlags,
+    Language,
     Object,
     Program,
+    ProgramFlags,
     Qualifiers,
     TypeEnumerator,
     TypeMember,
@@ -24,6 +27,7 @@ from drgn import (
     void_type,
 )
 from tests import (
+    DEFAULT_LANGUAGE,
     ObjectTestCase,
     color_type,
     coord_type,
@@ -31,7 +35,7 @@ from tests import (
     pid_type,
     point_type,
 )
-from tests.dwarf import DW_AT, DW_ATE, DW_FORM, DW_TAG
+from tests.dwarf import DW_AT, DW_ATE, DW_FORM, DW_LANG, DW_TAG
 from tests.dwarfwriter import compile_dwarf, DwarfDie, DwarfAttrib
 
 
@@ -194,10 +198,10 @@ base_type_dies += (
 )
 
 
-def dwarf_program(dies, little_endian=True, bits=64):
+def dwarf_program(*args, **kwds):
     prog = Program()
     with tempfile.NamedTemporaryFile() as f:
-        f.write(compile_dwarf(dies, little_endian, bits))
+        f.write(compile_dwarf(*args, **kwds))
         f.flush()
         prog.load_debug_info([f.name])
     return prog
@@ -205,7 +209,7 @@ def dwarf_program(dies, little_endian=True, bits=64):
 
 class TestTypes(unittest.TestCase):
     @staticmethod
-    def type_from_dwarf(dies, little_endian=True):
+    def type_from_dwarf(dies, *args, **kwds):
         if isinstance(dies, DwarfDie):
             dies = (dies,)
         dies = tuple(dies) + (
@@ -217,11 +221,11 @@ class TestTypes(unittest.TestCase):
                 ],
             ),
         )
-        prog = dwarf_program(dies, little_endian)
+        prog = dwarf_program(dies, *args, **kwds)
         return prog.type("__TEST__").type
 
-    def assertFromDwarf(self, dies, type, little_endian=True):
-        self.assertEqual(self.type_from_dwarf(dies, little_endian), type)
+    def assertFromDwarf(self, dies, type, *args, **kwds):
+        self.assertEqual(self.type_from_dwarf(dies, *args, **kwds), type)
 
     def test_unknown_tag(self):
         die = DwarfDie(0x9999, ())
@@ -1849,6 +1853,21 @@ class TestTypes(unittest.TestCase):
             ),
         )
 
+    def test_language(self):
+        for name, lang in DW_LANG.__members__.items():
+            if re.fullmatch("C[0-9]*", name):
+                self.assertFromDwarf(
+                    (int_die,),
+                    int_type("int", 4, True, language=Language.C),
+                    lang=lang,
+                )
+
+        self.assertFromDwarf(
+            (int_die,),
+            int_type("int", 4, True, language=DEFAULT_LANGUAGE),
+            lang=DW_LANG.BLISS,
+        )
+
 
 class TestObjects(ObjectTestCase):
     def test_constant(self):
@@ -2020,3 +2039,49 @@ class TestObjects(ObjectTestCase):
     def test_not_found(self):
         prog = dwarf_program([int_die])
         self.assertRaisesRegex(LookupError, "could not find", prog.object, "y")
+
+
+class TestProgram(unittest.TestCase):
+    def test_language(self):
+        dies = (
+            DwarfDie(
+                DW_TAG.subprogram,
+                (
+                    DwarfAttrib(DW_AT.name, DW_FORM.string, "main"),
+                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),
+                    DwarfAttrib(DW_AT.low_pc, DW_FORM.addr, 0x7FC3EB9B1C30),
+                ),
+            ),
+            int_die,
+        )
+        self.assertEqual(dwarf_program(()).language, DEFAULT_LANGUAGE)
+        self.assertEqual(dwarf_program(dies).language, DEFAULT_LANGUAGE)
+        self.assertEqual(dwarf_program(dies, lang=DW_LANG.C).language, Language.C)
+        self.assertEqual(
+            dwarf_program(dies, lang=DW_LANG.BLISS).language, DEFAULT_LANGUAGE
+        )
+
+    def test_reference_counting(self):
+        # Test that we keep the appropriate objects alive even if we don't have
+        # an explicit reference (e.g., from a temporary variable).
+        dies = (
+            int_die,
+            DwarfDie(
+                DW_TAG.variable,
+                [
+                    DwarfAttrib(DW_AT.name, DW_FORM.string, "x"),
+                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 0),
+                    DwarfAttrib(
+                        DW_AT.location,
+                        DW_FORM.exprloc,
+                        b"\x03\x04\x03\x02\x01\xff\xff\xff\xff",
+                    ),
+                ],
+            ),
+        )
+        self.assertEqual(dwarf_program(dies)["x"].address_, 0xFFFFFFFF01020304)
+        self.assertEqual(
+            dwarf_program(dies)["x"].prog_["x"].address_, 0xFFFFFFFF01020304
+        )
+        self.assertFalse(dwarf_program(dies)["x"].prog_.flags & ProgramFlags.IS_LIVE)
+        self.assertEqual(dwarf_program(dies)["x"].type_.name, "int")

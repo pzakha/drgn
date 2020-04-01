@@ -61,6 +61,8 @@ struct drgn_program {
 	struct drgn_object_index oindex;
 	struct drgn_memory_file_segment *file_segments;
 	size_t num_file_segments;
+	/* Default language of the program. */
+	const struct drgn_language *lang;
 	/*
 	 * Valid iff <tt>flags & DRGN_PROGRAM_IS_LINUX_KERNEL</tt>.
 	 */
@@ -154,6 +156,15 @@ struct drgn_error *drgn_program_get_dwfl(struct drgn_program *prog, Dwfl **ret);
  */
 struct drgn_error *drgn_program_find_prstatus(struct drgn_program *prog,
 					      uint32_t tid, struct string *ret);
+
+/**
+ * Cache the @c NT_PRSTATUS note provided by @p data in @p prog.
+ *
+ * @param[in] data The pointer to the note data.
+ * @param[in] size Size of data in note.
+ */
+struct drgn_error *drgn_program_cache_prstatus_entry(struct drgn_program *prog,
+                                                     char *data, size_t size);
 
 /*
  * Like @ref drgn_program_find_symbol_by_address(), but @p ret is already
