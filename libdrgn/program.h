@@ -1,4 +1,4 @@
-// Copyright 2018-2019 - Omar Sandoval
+// Copyright 2018-2020 - Omar Sandoval
 // SPDX-License-Identifier: GPL-3.0+
 
 /**
@@ -47,6 +47,10 @@ struct vmcoreinfo {
 	 * is enabled.
 	 */
 	uint64_t kaslr_offset;
+	/** Kernel page table. */
+	uint64_t swapper_pg_dir;
+	/** Whether 5-level paging was enabled. */
+	bool pgtable_l5_enabled;
 };
 
 DEFINE_HASH_MAP_TYPE(drgn_prstatus_map, uint32_t, struct string)
@@ -60,13 +64,16 @@ struct drgn_program {
 	struct drgn_type_index tindex;
 	struct drgn_object_index oindex;
 	struct drgn_memory_file_segment *file_segments;
-	size_t num_file_segments;
 	/* Default language of the program. */
 	const struct drgn_language *lang;
 	/*
 	 * Valid iff <tt>flags & DRGN_PROGRAM_IS_LINUX_KERNEL</tt>.
 	 */
 	struct vmcoreinfo vmcoreinfo;
+	/* Cached PAGE_OFFSET. */
+	uint64_t page_offset;
+	/* Cached vmemmap. */
+	uint64_t vmemmap;
 #ifdef WITH_LIBKDUMPFILE
 	kdump_ctx_t *kdump_ctx;
 #endif
@@ -94,7 +101,14 @@ struct drgn_program {
 	bool has_platform;
 	bool attached_dwfl_state;
 	bool prstatus_cached;
+	/*
+	 * Whether @ref drgn_program::pgtable_it is currently being used. Used
+	 * to prevent address translation from recursing.
+	 */
+	bool pgtable_it_in_use;
 
+	/* Page table iterator for linux_helper_read_vm(). */
+	struct pgtable_iterator *pgtable_it;
 	/* Cache for @ref linux_helper_task_state_to_char(). */
 	char *task_state_chars;
 	uint64_t task_report;
@@ -136,6 +150,16 @@ static inline bool drgn_program_is_little_endian(struct drgn_program *prog)
 {
 	assert(prog->has_platform);
 	return prog->platform.flags & DRGN_PLATFORM_IS_LITTLE_ENDIAN;
+}
+
+/**
+ * Return whether a @ref drgn_program has a different endianness than the host
+ * system.
+ */
+static inline bool drgn_program_bswap(struct drgn_program *prog)
+{
+	return (drgn_program_is_little_endian(prog) !=
+		(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__));
 }
 
 static inline bool drgn_program_is_64_bit(struct drgn_program *prog)

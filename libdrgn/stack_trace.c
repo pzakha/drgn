@@ -45,7 +45,8 @@ drgn_format_stack_trace(struct drgn_stack_trace *trace, char **ret)
 	struct drgn_stack_frame frame = { .trace = trace, };
 
 	for (; frame.i < trace->num_frames; frame.i++) {
-		uint64_t pc;
+		Dwarf_Addr pc;
+		bool isactivation;
 		Dwfl_Module *module;
 		struct drgn_symbol sym;
 
@@ -54,11 +55,12 @@ drgn_format_stack_trace(struct drgn_stack_trace *trace, char **ret)
 			goto err;
 		}
 
-		pc = drgn_stack_frame_pc(frame);
+		dwfl_frame_pc(trace->frames[frame.i], &pc, &isactivation);
 		module = dwfl_frame_module(trace->frames[frame.i]);
 		if (module &&
 		    drgn_program_find_symbol_by_address_internal(trace->prog,
-								 pc, module,
+								 pc - !isactivation,
+								 module,
 								 &sym)) {
 			if (!string_builder_appendf(&str,
 						    "%s+0x%" PRIx64 "/0x%" PRIx64,
@@ -102,11 +104,14 @@ LIBDRGN_PUBLIC uint64_t drgn_stack_frame_pc(struct drgn_stack_frame frame)
 LIBDRGN_PUBLIC struct drgn_error *
 drgn_stack_frame_symbol(struct drgn_stack_frame frame, struct drgn_symbol **ret)
 {
-	uint64_t pc;
+	Dwarf_Addr pc;
+	bool isactivation;
 	Dwfl_Module *module;
 	struct drgn_symbol *sym;
 
-	pc = drgn_stack_frame_pc(frame);
+	dwfl_frame_pc(frame.trace->frames[frame.i], &pc, &isactivation);
+	if (!isactivation)
+		pc--;
 	module = dwfl_frame_module(frame.trace->frames[frame.i]);
 	if (!module)
 		return drgn_error_symbol_not_found(pc);
@@ -156,39 +161,24 @@ static bool drgn_thread_memory_read(Dwfl *dwfl, Dwarf_Addr addr,
 {
 	struct drgn_error *err;
 	struct drgn_program *prog = dwfl_arg;
-	bool is_little_endian = drgn_program_is_little_endian(prog);
+	uint64_t word;
 
-	if (drgn_program_is_64_bit(prog)) {
-		uint64_t u64;
-
-		err = drgn_program_read_memory(prog, &u64, addr, sizeof(u64),
-					       false);
-		if (err)
-			goto err;
-		*result = is_little_endian ? le64toh(u64) : be64toh(u64);
-	} else {
-		uint32_t u32;
-
-		err = drgn_program_read_memory(prog, &u32, addr, sizeof(u32),
-					       false);
-		if (err)
-			goto err;
-		*result = is_little_endian ? le32toh(u32) : be32toh(u32);
+	err = drgn_program_read_word(prog, addr, false, &word);
+	if (err) {
+		if (err->code == DRGN_ERROR_FAULT) {
+			/*
+			 * This could be the end of the stack trace, so it shouldn't be
+			 * fatal.
+			 */
+			drgn_error_destroy(err);
+		} else {
+			drgn_error_destroy(prog->stack_trace_err);
+			prog->stack_trace_err = err;
+		}
+		return false;
 	}
+	*result = word;
 	return true;
-
-err:
-	if (err->code == DRGN_ERROR_FAULT) {
-		/*
-		 * This could be the end of the stack trace, so it shouldn't be
-		 * fatal.
-		 */
-		drgn_error_destroy(err);
-	} else {
-		drgn_error_destroy(prog->stack_trace_err);
-		prog->stack_trace_err = err;
-	}
-	return false;
 }
 
 /*
@@ -362,7 +352,7 @@ drgn_prstatus_set_initial_registers(Dwfl_Thread *thread,
 			break;
 		}
 		default:
-			DRGN_UNREACHABLE();
+			UNREACHABLE();
 		}
 		if (!dwfl_thread_state_registers(thread, reg->number, 1, &word))
 			return drgn_error_libdwfl();

@@ -12,17 +12,23 @@ struct drgn_dwarf_index;
 struct drgn_memory_reader;
 struct vmcoreinfo;
 
+struct drgn_error *read_memory_via_pgtable(void *buf, uint64_t address,
+					   size_t count, uint64_t offset,
+					   void *arg, bool physical);
+
 struct drgn_error *parse_vmcoreinfo(const char *desc, size_t descsz,
 				    struct vmcoreinfo *ret);
 
+struct drgn_error *proc_kallsyms_symbol_addr(const char *name,
+					     unsigned long *ret);
+
 struct drgn_error *read_vmcoreinfo_fallback(struct drgn_memory_reader *reader,
-					    bool have_non_zero_phys_addr,
 					    struct vmcoreinfo *ret);
 
-struct drgn_error *
-vmcoreinfo_object_find(const char *name, size_t name_len, const char *filename,
-		       enum drgn_find_object_flags flags, void *arg,
-		       struct drgn_object *ret);
+struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
+					    const char *filename,
+					    enum drgn_find_object_flags flags,
+					    void *arg, struct drgn_object *ret);
 
 struct drgn_error *
 linux_kernel_report_debug_info(struct drgn_program *prog,

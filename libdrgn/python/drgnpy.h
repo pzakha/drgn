@@ -287,6 +287,8 @@ struct enum_arg {
 };
 int enum_converter(PyObject *o, void *p);
 
+PyObject *drgnpy_linux_helper_read_vm(PyObject *self, PyObject *args,
+				      PyObject *kwds);
 DrgnObject *drgnpy_linux_helper_radix_tree_lookup(PyObject *self,
 						  PyObject *args,
 						  PyObject *kwds);
@@ -299,6 +301,8 @@ DrgnObject *drgnpy_linux_helper_pid_task(PyObject *self, PyObject *args,
 DrgnObject *drgnpy_linux_helper_find_task(PyObject *self, PyObject *args,
 					  PyObject *kwds);
 PyObject *drgnpy_linux_helper_task_state_to_char(PyObject *self, PyObject *args,
+						 PyObject *kwds);
+PyObject *drgnpy_linux_helper_pgtable_l5_enabled(PyObject *self, PyObject *args,
 						 PyObject *kwds);
 
 #endif /* DRGNPY_H */

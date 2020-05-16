@@ -84,6 +84,7 @@ void drgn_program_deinit(struct drgn_program *prog)
 {
 	free(prog->task_state_chars);
 	drgn_prstatus_map_deinit(&prog->prstatus_cache);
+	free(prog->pgtable_it);
 
 	drgn_object_index_deinit(&prog->oindex);
 	drgn_type_index_deinit(&prog->tindex);
@@ -189,9 +190,8 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 	struct drgn_platform platform;
 	bool is_64_bit, is_kdump;
 	size_t phnum, i;
-	size_t num_file_segments;
-	bool have_non_zero_phys_addr = false;
-	struct drgn_memory_file_segment *current_file_segment;
+	size_t num_file_segments, j;
+	bool have_phys_addrs = false;
 	const char *vmcoreinfo_note = NULL;
 	size_t vmcoreinfo_size = 0;
 	bool have_nt_taskstruct = false, is_proc_kcore;
@@ -253,7 +253,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 
 		if (phdr->p_type == PT_LOAD) {
 			if (phdr->p_paddr)
-				have_non_zero_phys_addr = true;
+				have_phys_addrs = true;
 			num_file_segments++;
 		} else if (phdr->p_type == PT_NOTE) {
 			Elf_Data *data;
@@ -285,6 +285,12 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 						   nhdr.n_namesz) == 0) {
 					vmcoreinfo_note = desc;
 					vmcoreinfo_size = nhdr.n_descsz;
+					/*
+					 * This is either a vmcore or
+					 * /proc/kcore, so even a p_paddr of 0
+					 * may be valid.
+					 */
+					have_phys_addrs = true;
 				}
 			}
 		}
@@ -309,23 +315,10 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 
 	if (vmcoreinfo_note && !is_proc_kcore) {
 		char *env;
-		bool use_libkdumpfile;
 
-		/*
-		 * Use libkdumpfile for ELF vmcores if we were compiled with
-		 * libkdumpfile support unless specified otherwise.
-		 */
+		/* Use libkdumpfile for ELF vmcores if it was requested. */
 		env = getenv("DRGN_USE_LIBKDUMPFILE_FOR_ELF");
-		if (env) {
-			use_libkdumpfile = atoi(env);
-		} else {
-#ifdef WITH_LIBKDUMPFILE
-			use_libkdumpfile = true;
-#else
-			use_libkdumpfile = false;
-#endif
-		}
-		if (use_libkdumpfile) {
+		if (env && atoi(env)) {
 			err = drgn_program_set_kdump(prog);
 			if (err)
 				goto out_elf;
@@ -339,11 +332,23 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 		err = &drgn_enomem;
 		goto out_elf;
 	}
-	prog->num_file_segments = num_file_segments;
-	current_file_segment = prog->file_segments;
+
+	if (is_proc_kcore || vmcoreinfo_note) {
+		/*
+		 * Try to read any memory that isn't in the core dump via the
+		 * page table.
+		 */
+		err = drgn_program_add_memory_segment(prog, 0,
+						      is_64_bit ?
+						      UINT64_MAX : UINT32_MAX,
+						      read_memory_via_pgtable,
+						      prog, false);
+		if (err)
+			goto out_segments;
+	}
 
 	/* Second pass: add the segments. */
-	for (i = 0; i < phnum; i++) {
+	for (i = 0, j = 0; i < phnum && j < num_file_segments; i++) {
 		GElf_Phdr phdr_mem, *phdr;
 
 		phdr = gelf_getphdr(prog->core, i, &phdr_mem);
@@ -352,40 +357,78 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 			goto out_segments;
 		}
 
-		if (phdr->p_type == PT_LOAD) {
-			/*
-			 * If this happens, then the number of segments changed
-			 * since the first pass. That's probably impossible, but
-			 * skip it just in case.
-			 */
-			if (current_file_segment ==
-			    prog->file_segments + prog->num_file_segments)
-				continue;
-			current_file_segment->file_offset = phdr->p_offset;
-			current_file_segment->file_size = phdr->p_filesz;
-			current_file_segment->fd = prog->core_fd;
-			current_file_segment->eio_is_fault = false;
+		if (phdr->p_type != PT_LOAD)
+			continue;
+
+		prog->file_segments[j].file_offset = phdr->p_offset;
+		prog->file_segments[j].file_size = phdr->p_filesz;
+		prog->file_segments[j].fd = prog->core_fd;
+		prog->file_segments[j].eio_is_fault = false;
+		err = drgn_program_add_memory_segment(prog, phdr->p_vaddr,
+						      phdr->p_memsz,
+						      drgn_read_memory_file,
+						      &prog->file_segments[j],
+						      false);
+		if (err)
+			goto out_segments;
+		if (have_phys_addrs &&
+		    phdr->p_paddr != (is_64_bit ? UINT64_MAX : UINT32_MAX)) {
 			err = drgn_program_add_memory_segment(prog,
-							      phdr->p_vaddr,
+							      phdr->p_paddr,
 							      phdr->p_memsz,
 							      drgn_read_memory_file,
-							      current_file_segment,
-							      false);
+							      &prog->file_segments[j],
+							      true);
 			if (err)
 				goto out_segments;
-			if (have_non_zero_phys_addr &&
-			    phdr->p_paddr !=
-			    (is_64_bit ? UINT64_MAX : UINT32_MAX)) {
+		}
+		j++;
+	}
+	/*
+	 * Before Linux kernel commit 464920104bf7 ("/proc/kcore: update
+	 * physical address for kcore ram and text") (in v4.11), p_paddr in
+	 * /proc/kcore is always zero. If we know the address of the direct
+	 * mapping, we can still add physical segments. This needs to be a third
+	 * pass, as we may need to read virtual memory to determine the mapping.
+	 */
+	if (is_proc_kcore && !have_phys_addrs &&
+	    platform.arch->linux_kernel_live_direct_mapping_fallback) {
+		uint64_t direct_mapping, direct_mapping_size;
+
+		err = platform.arch->linux_kernel_live_direct_mapping_fallback(prog,
+									       &direct_mapping,
+									       &direct_mapping_size);
+		if (err)
+			goto out_segments;
+
+		for (i = 0, j = 0; i < phnum && j < num_file_segments; i++) {
+			GElf_Phdr phdr_mem, *phdr;
+
+			phdr = gelf_getphdr(prog->core, i, &phdr_mem);
+			if (!phdr) {
+				err = drgn_error_libelf();
+				goto out_segments;
+			}
+
+			if (phdr->p_type != PT_LOAD)
+				continue;
+
+			if (phdr->p_vaddr >= direct_mapping &&
+			    phdr->p_vaddr - direct_mapping + phdr->p_memsz <=
+			    direct_mapping_size) {
+				uint64_t phys_addr;
+
+				phys_addr = phdr->p_vaddr - direct_mapping;
 				err = drgn_program_add_memory_segment(prog,
-								      phdr->p_paddr,
+								      phys_addr,
 								      phdr->p_memsz,
 								      drgn_read_memory_file,
-								      current_file_segment,
+								      &prog->file_segments[j],
 								      true);
 				if (err)
 					goto out_segments;
 			}
-			current_file_segment++;
+			j++;
 		}
 	}
 	if (vmcoreinfo_note) {
@@ -398,7 +441,6 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 	if (is_proc_kcore) {
 		if (!vmcoreinfo_note) {
 			err = read_vmcoreinfo_fallback(&prog->reader,
-						       have_non_zero_phys_addr,
 						       &prog->vmcoreinfo);
 			if (err)
 				goto out_segments;
@@ -412,7 +454,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 	}
 	if (prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) {
 		err = drgn_program_add_object_finder(prog,
-						     vmcoreinfo_object_find,
+						     linux_kernel_object_find,
 						     prog);
 		if (err)
 			goto out_segments;
@@ -428,7 +470,6 @@ out_segments:
 	drgn_memory_reader_init(&prog->reader);
 	free(prog->file_segments);
 	prog->file_segments = NULL;
-	prog->num_file_segments = 0;
 out_elf:
 	elf_end(prog->core);
 	prog->core = NULL;
@@ -468,7 +509,6 @@ drgn_program_set_pid(struct drgn_program *prog, pid_t pid)
 	prog->file_segments[0].file_size = UINT64_MAX;
 	prog->file_segments[0].fd = prog->core_fd;
 	prog->file_segments[0].eio_is_fault = true;
-	prog->num_file_segments = 1;
 	err = drgn_program_add_memory_segment(prog, 0, UINT64_MAX,
 					      drgn_read_memory_file,
 					      prog->file_segments, false);
@@ -485,7 +525,6 @@ out_segments:
 	drgn_memory_reader_init(&prog->reader);
 	free(prog->file_segments);
 	prog->file_segments = NULL;
-	prog->num_file_segments = 0;
 out_fd:
 	close(prog->core_fd);
 	prog->core_fd = -1;
@@ -544,29 +583,6 @@ struct drgn_error *drgn_program_get_dwfl(struct drgn_program *prog, Dwfl **ret)
 	return NULL;
 }
 
-/* Set the default language from the language of "main". */
-static struct drgn_error *
-drgn_program_set_language_from_main(struct drgn_program *prog)
-{
-	struct drgn_error *err;
-	struct drgn_object res;
-
-	drgn_object_init(&res, prog);
-	err = drgn_program_find_object(prog, "main", NULL, DRGN_FIND_OBJECT_ANY,
-				       &res);
-	if (err) {
-		if (err->code == DRGN_ERROR_LOOKUP) {
-			/* We couldn't find "main". Don't set the language. */
-			drgn_error_destroy(err);
-			err = NULL;
-		}
-	} else {
-		prog->lang = drgn_type_language(res.type);
-	}
-	drgn_object_deinit(&res);
-	return err;
-}
-
 static struct drgn_error *
 userspace_report_debug_info(struct drgn_program *prog,
 			    struct drgn_dwarf_index *dindex,
@@ -614,13 +630,42 @@ userspace_report_debug_info(struct drgn_program *prog,
 			return drgn_error_libdwfl();
 		}
 	}
-
-	if (!prog->lang) {
-		err = drgn_program_set_language_from_main(prog);
-		if (err)
-			return err;
-	}
 	return NULL;
+}
+
+/* Set the default language from the language of "main". */
+static void drgn_program_set_language_from_main(struct drgn_program *prog,
+						struct drgn_dwarf_index *dindex)
+{
+	struct drgn_error *err;
+	struct drgn_dwarf_index_iterator it;
+	static const uint64_t tags[] = { DW_TAG_subprogram };
+
+	drgn_dwarf_index_iterator_init(&it, dindex, "main", strlen("main"),
+				       tags, ARRAY_SIZE(tags));
+	for (;;) {
+		Dwarf_Die die;
+		const struct drgn_language *lang;
+
+		err = drgn_dwarf_index_iterator_next(&it, &die, NULL);
+		if (err == &drgn_stop) {
+			break;
+		} else if (err) {
+			drgn_error_destroy(err);
+			continue;
+		}
+
+		err = drgn_language_from_die(&die, &lang);
+		if (err) {
+			drgn_error_destroy(err);
+			continue;
+		}
+
+		if (lang) {
+			prog->lang = lang;
+			break;
+		}
+	}
 }
 
 static int drgn_set_platform_from_dwarf(Dwfl_Module *module, void **userdatap,
@@ -676,10 +721,14 @@ drgn_program_load_debug_info(struct drgn_program *prog, const char **paths,
 	report_from_dwfl = (!(prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
 			    load_main);
 	err = drgn_dwarf_index_report_end(dindex, report_from_dwfl);
-	if ((!err || err->code == DRGN_ERROR_MISSING_DEBUG_INFO) &&
-	    !prog->has_platform) {
-		dwfl_getdwarf(prog->_dicache->dindex.dwfl,
-			      drgn_set_platform_from_dwarf, prog, 0);
+	if ((!err || err->code == DRGN_ERROR_MISSING_DEBUG_INFO)) {
+		if (!prog->lang &&
+		    !(prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL))
+			drgn_program_set_language_from_main(prog, dindex);
+		if (!prog->has_platform) {
+			dwfl_getdwarf(dindex->dwfl,
+				      drgn_set_platform_from_dwarf, prog, 0);
+		}
 	}
 	return err;
 }
@@ -690,17 +739,14 @@ struct drgn_error *drgn_program_cache_prstatus_entry(struct drgn_program *prog,
 	struct drgn_prstatus_map_entry entry;
 	size_t pr_pid_offset;
 	uint32_t pr_pid;
-	bool bswap;
 
 	pr_pid_offset = drgn_program_is_64_bit(prog) ? 32 : 24;
-	bswap = (drgn_program_is_little_endian(prog) !=
-		 (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__));
 
 	if (size < pr_pid_offset + sizeof(pr_pid))
 		return NULL;
 
 	memcpy(&pr_pid, data + pr_pid_offset, sizeof(pr_pid));
-	if (bswap)
+	if (drgn_program_bswap(prog))
 		pr_pid = bswap_32(pr_pid);
 	if (!pr_pid)
 		return NULL;
@@ -944,6 +990,73 @@ drgn_program_read_c_string(struct drgn_program *prog, uint64_t address,
 	}
 	char_vector_shrink_to_fit(&str);
 	*ret = str.data;
+	return NULL;
+}
+
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_program_read_u8(struct drgn_program *prog, uint64_t address, bool physical,
+		     uint8_t *ret)
+{
+	return drgn_memory_reader_read(&prog->reader, ret, address,
+				       sizeof(*ret), physical);
+}
+
+#define DEFINE_PROGRAM_READ_U(n)						\
+LIBDRGN_PUBLIC struct drgn_error *						\
+drgn_program_read_u##n(struct drgn_program *prog, uint64_t address,		\
+		       bool physical, uint##n##_t *ret)				\
+{										\
+	struct drgn_error *err;							\
+	uint##n##_t tmp;							\
+										\
+	if (!prog->has_platform) {						\
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,		\
+					 "program byte order is not known");	\
+	}									\
+	err = drgn_memory_reader_read(&prog->reader, &tmp, address,		\
+				      sizeof(tmp), physical);			\
+	if (err)								\
+		return err;							\
+	if (drgn_program_bswap(prog))						\
+		tmp = bswap_##n(tmp);						\
+	*ret = tmp;								\
+	return NULL;								\
+}
+
+DEFINE_PROGRAM_READ_U(16)
+DEFINE_PROGRAM_READ_U(32)
+DEFINE_PROGRAM_READ_U(64)
+#undef DEFINE_PROGRAM_READ_U
+
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_program_read_word(struct drgn_program *prog, uint64_t address,
+		       bool physical, uint64_t *ret)
+{
+	struct drgn_error *err;
+
+	if (!prog->has_platform) {
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
+					 "program word size is not known");
+	}
+	if (drgn_program_is_64_bit(prog)) {
+		uint64_t tmp;
+		err = drgn_memory_reader_read(&prog->reader, &tmp, address,
+					      sizeof(tmp), physical);
+		if (err)
+			return err;
+		if (drgn_program_bswap(prog))
+			tmp = bswap_64(tmp);
+		*ret = tmp;
+	} else {
+		uint32_t tmp;
+		err = drgn_memory_reader_read(&prog->reader, &tmp, address,
+					      sizeof(tmp), physical);
+		if (err)
+			return err;
+		if (drgn_program_bswap(prog))
+			tmp = bswap_32(tmp);
+		*ret = tmp;
+	}
 	return NULL;
 }
 

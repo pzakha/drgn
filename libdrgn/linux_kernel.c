@@ -1,4 +1,4 @@
-// Copyright 2018-2019 - Omar Sandoval
+// Copyright 2018-2020 - Omar Sandoval
 // SPDX-License-Identifier: GPL-3.0+
 
 #include <dirent.h>
@@ -14,9 +14,19 @@
 
 #include "internal.h"
 #include "dwarf_index.h"
+#include "helpers.h"
 #include "linux_kernel.h"
 #include "program.h"
 #include "read.h"
+
+struct drgn_error *read_memory_via_pgtable(void *buf, uint64_t address,
+					   size_t count, uint64_t offset,
+					   void *arg, bool physical)
+{
+	struct drgn_program *prog = arg;
+	return linux_helper_read_vm(prog, prog->vmcoreinfo.swapper_pg_dir,
+				    address, buf, count);
+}
 
 static inline bool linematch(const char **line, const char *prefix)
 {
@@ -58,6 +68,7 @@ struct drgn_error *parse_vmcoreinfo(const char *desc, size_t descsz,
 	ret->osrelease[0] = '\0';
 	ret->page_size = 0;
 	ret->kaslr_offset = 0;
+	ret->pgtable_l5_enabled = false;
 	while (line < end) {
 		const char *newline;
 
@@ -82,6 +93,18 @@ struct drgn_error *parse_vmcoreinfo(const char *desc, size_t descsz,
 					  &ret->kaslr_offset);
 			if (err)
 				return err;
+		} else if (linematch(&line, "SYMBOL(swapper_pg_dir)=")) {
+			err = line_to_u64(line, newline, 16,
+					  &ret->swapper_pg_dir);
+			if (err)
+				return err;
+		} else if (linematch(&line, "NUMBER(pgtable_l5_enabled)=")) {
+			uint64_t tmp;
+
+			err = line_to_u64(line, newline, 0, &tmp);
+			if (err)
+				return err;
+			ret->pgtable_l5_enabled = tmp;
 		}
 		line = newline + 1;
 	}
@@ -93,12 +116,16 @@ struct drgn_error *parse_vmcoreinfo(const char *desc, size_t descsz,
 		return drgn_error_create(DRGN_ERROR_OTHER,
 					 "VMCOREINFO does not contain valid PAGESIZE");
 	}
-	/* KERNELOFFSET is optional. */
+	if (!ret->swapper_pg_dir) {
+		return drgn_error_create(DRGN_ERROR_OTHER,
+					 "VMCOREINFO does not contain valid swapper_pg_dir");
+	}
+	/* KERNELOFFSET and pgtable_l5_enabled are optional. */
 	return NULL;
 }
 
-static struct drgn_error *proc_kallsyms_symbol_addr(const char *name,
-						    unsigned long *ret)
+struct drgn_error *proc_kallsyms_symbol_addr(const char *name,
+					     unsigned long *ret)
 {
 	struct drgn_error *err;
 	FILE *file;
@@ -118,9 +145,7 @@ static struct drgn_error *proc_kallsyms_symbol_addr(const char *name,
 				err = drgn_error_create_os("getline", errno,
 							   "/proc/kallsyms");
 			} else {
-				err = drgn_error_format(DRGN_ERROR_OTHER,
-							"could not find %s symbol in /proc/kallsyms",
-							name);
+				err = &drgn_not_found;
 			}
 			break;
 		}
@@ -155,20 +180,16 @@ invalid:
 
 /*
  * Before Linux kernel commit 23c85094fe18 ("proc/kcore: add vmcoreinfo note to
- * /proc/kcore") (in v4.19), /proc/kcore didn't have a VMCOREINFO note, so we
- * have to get it by other means. Since Linux kernel commit 464920104bf7
- * ("/proc/kcore: update physical address for kcore ram and text") (in v4.11),
+ * /proc/kcore") (in v4.19), /proc/kcore didn't have a VMCOREINFO note. Instead,
  * we can read from the physical address of the vmcoreinfo note exported in
- * sysfs. Before that, p_paddr in /proc/kcore is always zero, but we can read
- * from the virtual address in /proc/kallsyms.
+ * sysfs.
  */
 struct drgn_error *read_vmcoreinfo_fallback(struct drgn_memory_reader *reader,
-					    bool have_non_zero_phys_addr,
 					    struct vmcoreinfo *ret)
 {
 	struct drgn_error *err;
 	FILE *file;
-	unsigned long address;
+	uint64_t address;
 	size_t size;
 	char *buf;
 	Elf64_Nhdr *nhdr;
@@ -178,32 +199,18 @@ struct drgn_error *read_vmcoreinfo_fallback(struct drgn_memory_reader *reader,
 		return drgn_error_create_os("fopen", errno,
 					    "/sys/kernel/vmcoreinfo");
 	}
-	if (fscanf(file, "%lx %zx", &address, &size) != 2) {
+	if (fscanf(file, "%" SCNx64 "%zx", &address, &size) != 2) {
 		fclose(file);
 		return drgn_error_create(DRGN_ERROR_OTHER,
 					 "could not parse /sys/kernel/vmcoreinfo");
 	}
 	fclose(file);
 
-	if (!have_non_zero_phys_addr) {
-		/*
-		 * Since Linux kernel commit 203e9e41219b ("kexec: move
-		 * vmcoreinfo out of the kernel's .bss section") (in v4.13),
-		 * vmcoreinfo_note is a pointer; before that, it is an array. We
-		 * only do this for kernels before v4.11, so we can assume that
-		 * it's an array.
-		 */
-		err = proc_kallsyms_symbol_addr("vmcoreinfo_note", &address);
-		if (err)
-			return err;
-	}
-
 	buf = malloc(size);
 	if (!buf)
 		return &drgn_enomem;
 
-	err = drgn_memory_reader_read(reader, buf, address, size,
-				      have_non_zero_phys_addr);
+	err = drgn_memory_reader_read(reader, buf, address, size, true);
 	if (err)
 		goto out;
 
@@ -227,10 +234,10 @@ out:
 	return err;
 }
 
-struct drgn_error *
-vmcoreinfo_object_find(const char *name, size_t name_len, const char *filename,
-		       enum drgn_find_object_flags flags, void *arg,
-		       struct drgn_object *ret)
+struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
+					    const char *filename,
+					    enum drgn_find_object_flags flags,
+					    void *arg, struct drgn_object *ret)
 {
 	struct drgn_error *err;
 	struct drgn_program *prog = arg;
@@ -238,8 +245,29 @@ vmcoreinfo_object_find(const char *name, size_t name_len, const char *filename,
 	if (!filename && (flags & DRGN_FIND_OBJECT_CONSTANT)) {
 		struct drgn_qualified_type qualified_type = {};
 
-		if (name_len == strlen("PAGE_SHIFT") &&
-		    memcmp(name, "PAGE_SHIFT", name_len) == 0) {
+		if (name_len == strlen("PAGE_OFFSET") &&
+		    memcmp(name, "PAGE_OFFSET", name_len) == 0) {
+			if (!prog->page_offset) {
+				if (!prog->has_platform ||
+				    !prog->platform.arch->linux_kernel_get_page_offset)
+					return &drgn_not_found;
+				err = prog->platform.arch->linux_kernel_get_page_offset(prog,
+											&prog->page_offset);
+				if (err) {
+					prog->page_offset = 0;
+					return err;
+				}
+			}
+
+			err = drgn_type_index_find_primitive(&prog->tindex,
+							     DRGN_C_TYPE_UNSIGNED_LONG,
+							     &qualified_type.type);
+			if (err)
+				return err;
+			return drgn_object_set_unsigned(ret, qualified_type,
+							prog->page_offset, 0);
+		} else if (name_len == strlen("PAGE_SHIFT") &&
+			   memcmp(name, "PAGE_SHIFT", name_len) == 0) {
 			err = drgn_type_index_find_primitive(&prog->tindex,
 							     DRGN_C_TYPE_INT,
 							     &qualified_type.type);
@@ -289,6 +317,26 @@ vmcoreinfo_object_find(const char *name, size_t name_len, const char *filename,
 						      prog->vmcoreinfo.osrelease,
 						      0, 0,
 						      DRGN_PROGRAM_ENDIAN);
+		} else if (name_len == strlen("vmemmap") &&
+			   memcmp(name, "vmemmap", name_len) == 0) {
+			if (!prog->vmemmap) {
+				if (!prog->has_platform ||
+				    !prog->platform.arch->linux_kernel_get_vmemmap)
+					return &drgn_not_found;
+				err = prog->platform.arch->linux_kernel_get_vmemmap(prog,
+										    &prog->vmemmap);
+				if (err) {
+					prog->vmemmap = 0;
+					return err;
+				}
+			}
+
+			err = drgn_program_find_type(prog, "struct page *",
+						     NULL, &qualified_type);
+			if (err)
+				return err;
+			return drgn_object_set_unsigned(ret, qualified_type,
+							prog->vmemmap, 0);
 		}
 	}
 	return &drgn_not_found;

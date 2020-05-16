@@ -1,4 +1,4 @@
-# Copyright 2018-2019 - Omar Sandoval
+# Copyright 2018-2020 - Omar Sandoval
 # SPDX-License-Identifier: GPL-3.0+
 
 """
@@ -10,36 +10,35 @@ Linux memory management (MM) subsystem. Only x86-64 support is currently
 implemented.
 """
 
+from typing import List
+
+from _drgn import _linux_helper_read_vm, _linux_helper_pgtable_l5_enabled
 from drgn import Object, cast
 
 
 __all__ = (
+    "access_process_vm",
+    "access_remote_vm",
+    "cmdline",
+    "environ",
     "for_each_page",
     "page_to_pfn",
     "page_to_virt",
     "pfn_to_page",
     "pfn_to_virt",
+    "pgtable_l5_enabled",
     "virt_to_page",
     "virt_to_pfn",
 )
 
 
-def _vmemmap(prog):
-    try:
-        # KASAN
-        return cast("struct page *", prog["vmemmap_base"])
-    except KeyError:
-        # x86-64
-        return Object(prog, "struct page *", value=0xFFFFEA0000000000)
+def pgtable_l5_enabled(prog):
+    """
+    .. c:function:: bool pgtable_l5_enabled(void)
 
-
-def _page_offset(prog):
-    try:
-        # KASAN
-        return prog["page_offset_base"].value_()
-    except KeyError:
-        # x86-64
-        return 0xFFFF880000000000
+    Return whether 5-level paging is enabled.
+    """
+    return _linux_helper_pgtable_l5_enabled(prog)
 
 
 def for_each_page(prog):
@@ -48,7 +47,7 @@ def for_each_page(prog):
 
     :return: Iterator of ``struct page *`` objects.
     """
-    vmemmap = _vmemmap(prog)
+    vmemmap = prog["vmemmap"]
     for i in range(prog["max_pfn"]):
         yield vmemmap + i
 
@@ -59,7 +58,7 @@ def page_to_pfn(page):
 
     Get the page frame number (PFN) of a page.
     """
-    return cast("unsigned long", page - _vmemmap(page.prog_))
+    return cast("unsigned long", page - page.prog_["vmemmap"])
 
 
 def pfn_to_page(prog_or_pfn, pfn=None):
@@ -74,7 +73,7 @@ def pfn_to_page(prog_or_pfn, pfn=None):
         pfn = prog_or_pfn
     else:
         prog = prog_or_pfn
-    return _vmemmap(prog) + pfn
+    return prog["vmemmap"] + pfn
 
 
 def virt_to_pfn(prog_or_addr, addr=None):
@@ -90,7 +89,7 @@ def virt_to_pfn(prog_or_addr, addr=None):
         addr = prog_or_addr.value_()
     else:
         prog = prog_or_addr
-    return Object(prog, "unsigned long", value=(addr - _page_offset(prog)) >> 12)
+    return Object(prog, "unsigned long", value=(addr - prog["PAGE_OFFSET"]) >> 12)
 
 
 def pfn_to_virt(prog_or_pfn, pfn=None):
@@ -106,7 +105,7 @@ def pfn_to_virt(prog_or_pfn, pfn=None):
         pfn = prog_or_pfn.value_()
     else:
         prog = prog_or_pfn
-    return Object(prog, "void *", value=(pfn << 12) + _page_offset(prog))
+    return Object(prog, "void *", value=(pfn << 12) + prog["PAGE_OFFSET"])
 
 
 def page_to_virt(page):
@@ -127,3 +126,69 @@ def virt_to_page(prog_or_addr, addr=None):
     an ``int``.
     """
     return pfn_to_page(virt_to_pfn(prog_or_addr, addr))
+
+
+def access_process_vm(task, address, size) -> bytes:
+    """
+    .. c:function:: char *access_process_vm(struct task_struct *task, void *address, size_t size)
+
+    Read memory from a task's virtual address space.
+
+    >>> task = find_task(prog, 1490152)
+    >>> access_process_vm(task, 0x7f8a62b56da0, 12)
+    b'hello, world'
+    """
+    return _linux_helper_read_vm(task.prog_, task.mm.pgd, address, size)
+
+
+def access_remote_vm(mm, address, size) -> bytes:
+    """
+    .. c:function:: char *access_remote_vm(struct mm_struct *mm, void *address, size_t size)
+
+    Read memory from a virtual address space. This is similar to
+    :func:`access_process_vm()`, but it takes a ``struct mm_struct *`` instead
+    of a ``struct task_struct *``.
+
+    >>> task = find_task(prog, 1490152)
+    >>> access_remote_vm(task.mm, 0x7f8a62b56da0, 12)
+    b'hello, world'
+    """
+    return _linux_helper_read_vm(mm.prog_, mm.pgd, address, size)
+
+
+def cmdline(task) -> List[bytes]:
+    """
+    Get the list of command line arguments of a task.
+
+    >>> cmdline(find_task(prog, 1495216))
+    [b'vim', b'drgn/helpers/linux/mm.py']
+
+    .. code-block:: console
+
+        $ tr '\\0' ' ' < /proc/1495216/cmdline
+        vim drgn/helpers/linux/mm.py
+    """
+    mm = task.mm.read_()
+    arg_start = mm.arg_start.value_()
+    arg_end = mm.arg_end.value_()
+    return access_remote_vm(mm, arg_start, arg_end - arg_start).split(b"\0")[:-1]
+
+
+def environ(task) -> List[bytes]:
+    """
+    Get the list of environment variables of a task.
+
+    >>> environ(find_task(prog, 1497797))
+    [b'HOME=/root', b'PATH=/usr/local/sbin:/usr/local/bin:/usr/bin', b'LOGNAME=root']
+
+    .. code-block:: console
+
+        $ tr '\\0' '\\n' < /proc/1497797/environ
+        HOME=/root
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+        LOGNAME=root
+    """
+    mm = task.mm.read_()
+    env_start = mm.env_start.value_()
+    env_end = mm.env_end.value_()
+    return access_remote_vm(mm, env_start, env_end - env_start).split(b"\0")[:-1]

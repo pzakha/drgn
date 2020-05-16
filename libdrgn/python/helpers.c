@@ -1,8 +1,41 @@
-// Copyright 2019 - Omar Sandoval
+// Copyright 2019-2020 - Omar Sandoval
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "drgnpy.h"
 #include "../helpers.h"
+
+PyObject *drgnpy_linux_helper_read_vm(PyObject *self, PyObject *args,
+				      PyObject *kwds)
+{
+	static char *keywords[] = {"prog", "pgtable", "address", "size", NULL};
+	struct drgn_error *err;
+	Program *prog;
+	struct index_arg pgtable = {};
+	struct index_arg address = {};
+	Py_ssize_t size;
+	PyObject *buf;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O&O&n:read_vm",
+					 keywords, &Program_type, &prog,
+					 index_converter, &pgtable,
+					 index_converter, &address, &size))
+		return NULL;
+
+	if (size < 0) {
+		PyErr_SetString(PyExc_ValueError, "negative size");
+		return NULL;
+	}
+	buf = PyBytes_FromStringAndSize(NULL, size);
+	if (!buf)
+		return NULL;
+	err = linux_helper_read_vm(&prog->prog, pgtable.uvalue, address.uvalue,
+				   PyBytes_AS_STRING(buf), size);
+	if (err) {
+		Py_DECREF(buf);
+		return set_drgn_error(err);
+	}
+	return buf;
+}
 
 DrgnObject *drgnpy_linux_helper_radix_tree_lookup(PyObject *self,
 						  PyObject *args,
@@ -202,4 +235,22 @@ PyObject *drgnpy_linux_helper_task_state_to_char(PyObject *self, PyObject *args,
 	if (err)
 		return set_drgn_error(err);
 	return PyUnicode_FromStringAndSize(&c, 1);
+}
+
+PyObject *drgnpy_linux_helper_pgtable_l5_enabled(PyObject *self, PyObject *args,
+						 PyObject *kwds)
+
+{
+	static char *keywords[] = {"prog", NULL};
+	Program *prog;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!:pgtable_l5_enabled",
+					 keywords, &Program_type, &prog))
+		return NULL;
+
+	if ((prog->prog.flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
+	    prog->prog.vmcoreinfo.pgtable_l5_enabled)
+		Py_RETURN_TRUE;
+	else
+		Py_RETURN_FALSE;
 }

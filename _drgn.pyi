@@ -203,7 +203,7 @@ class Program:
         ...
     def pointer_type(
         self,
-        type: Type,
+        type: Union[str, Type],
         qualifiers: Optional[Qualifiers] = None,
         *,
         language: Optional[Language] = None,
@@ -234,6 +234,30 @@ class Program:
         :raises FaultError: if the address range is invalid or the type of
             address (physical or virtual) is not supported by the program
         :raises ValueError: if *size* is negative
+        """
+        ...
+    def read_u8(self, address: int, physical: bool = False) -> int: ...
+    def read_u16(self, address: int, physical: bool = False) -> int: ...
+    def read_u32(self, address: int, physical: bool = False) -> int: ...
+    def read_u64(self, address: int, physical: bool = False) -> int: ...
+    def read_word(self, address: int, physical: bool = False) -> int:
+        """
+        Read an unsigned integer from the program's memory in the program's
+        byte order.
+
+        :meth:`read_u8()`, :meth:`read_u16()`, :meth:`read_u32()`, and
+        :meth:`read_u64()` read an 8-, 16-, 32-, or 64-bit unsigned integer,
+        respectively. :meth:`read_word()` reads a program word-sized unsigned
+        integer.
+
+        For signed integers, alternate byte order, or other formats, you can
+        use :meth:`read()` and :meth:`int.from_bytes()` or the :mod:`struct`
+        module.
+
+        :param address: Address of the integer.
+        :param physical: Whether *address* is a physical memory address; see
+            :meth:`read()`.
+        :raises FaultError: if the address is invalid; see :meth:`read()`
         """
         ...
     def add_memory_segment(
@@ -665,7 +689,7 @@ class Object:
     """
     Size in bits of this object if it is a bit field, ``None`` if it is not.
     """
-    def __getattribute__(self, name: str) -> Any:
+    def __getattribute__(self, name: str) -> Object:
         """
         Implement ``self.name``.
 
@@ -679,7 +703,7 @@ class Object:
         :param name: Attribute name.
         """
         ...
-    def __getitem__(self, idx: int) -> Object:
+    def __getitem__(self, idx: Union[int, Object]) -> Object:
         """
         Implement ``self[idx]``. Get the array element at the given index.
 
@@ -961,7 +985,6 @@ def container_of(ptr: Object, type: Union[str, Type], member: str) -> Object:
 
     :param ptr: The pointer.
     :param type: The type of the containing object.
-    :type type: str or Type
     :param member: The name of the member in ``type``.
     :raises TypeError: if the object is not a pointer or the type is not a
         structure, union, or class type
@@ -1027,13 +1050,20 @@ class StackFrame:
 
     pc: int
     """
-    The return address at this stack frame, i.e., the value of the program
-    counter when control returns to this frame.
+    The program counter at this stack frame.
+
+    For the innermost frame, this is typically the instruction that was being
+    executed when the stack trace was captured. For function calls, this is
+    generally the return address, i.e., the value of the program counter when
+    control returns to this frame.
     """
     def symbol(self) -> Symbol:
         """
-        Get the function symbol at this stack frame. This is equivalent to
-        :meth:`prog.symbol(frame.pc) <Program.symbol>`.
+        Get the function symbol at this stack frame.
+
+        This may differ from :meth:`prog.symbol(frame.pc) <Program.symbol>`, as
+        for function calls, the program counter may be adjusted to the call
+        instruction instead of the return address.
         """
         ...
     def register(self, reg: Union[str, int, Register]) -> int:
@@ -1603,3 +1633,14 @@ class OutOfBoundsError(Exception):
     """
 
     ...
+
+_with_libkdumpfile: bool
+
+def _linux_helper_read_vm(prog, pgtable, address, size): ...
+def _linux_helper_radix_tree_lookup(root, index): ...
+def _linux_helper_idr_find(idr, id): ...
+def _linux_helper_find_pid(ns, pid): ...
+def _linux_helper_pid_task(pid, pid_type): ...
+def _linux_helper_find_task(ns, pid): ...
+def _linux_helper_task_state_to_char(task): ...
+def _linux_helper_pgtable_l5_enabled(prog): ...

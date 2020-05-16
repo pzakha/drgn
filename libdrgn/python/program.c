@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "drgnpy.h"
+#include "../vector.h"
 
 static int Program_hold_object(Program *prog, PyObject *obj)
 {
@@ -417,14 +418,15 @@ static PyObject *Program_set_pid(Program *self, PyObject *args, PyObject *kwds)
 	Py_RETURN_NONE;
 }
 
+DEFINE_VECTOR(path_arg_vector, struct path_arg)
+
 static PyObject *Program_load_debug_info(Program *self, PyObject *args,
 					 PyObject *kwds)
 {
 	static char *keywords[] = {"paths", "default", "main", NULL};
 	struct drgn_error *err;
 	PyObject *paths_obj = Py_None;
-	struct path_arg *path_args = NULL;
-	size_t n = 0, i;
+	struct path_arg_vector path_args;
 	const char **paths = NULL;
 	int load_default = 0;
 	int load_main = 0;
@@ -434,63 +436,66 @@ static PyObject *Program_load_debug_info(Program *self, PyObject *args,
 					 &load_main))
 		return NULL;
 
+	path_arg_vector_init(&path_args);
 	if (paths_obj != Py_None) {
 		Py_ssize_t length_hint;
 		PyObject *it, *item;
 
 		it = PyObject_GetIter(paths_obj);
 		if (!it)
-			return NULL;
+			goto out;
 
 		length_hint = PyObject_LengthHint(paths_obj, 1);
 		if (length_hint == -1) {
 			Py_DECREF(it);
-			return NULL;
+			goto out;
 		}
-		path_args = calloc(length_hint, sizeof(*path_args));
-		if (!path_args) {
+		if (!path_arg_vector_reserve(&path_args, length_hint)) {
+			PyErr_NoMemory();
 			Py_DECREF(it);
-			return NULL;
+			goto out;
 		}
 
 		while ((item = PyIter_Next(it))) {
+			struct path_arg *path_arg;
 			int ret;
 
-			if (n >= length_hint) {
-				length_hint *= 2;
-				if (!resize_array(&path_args, length_hint)) {
-					Py_DECREF(item);
-					PyErr_NoMemory();
-					break;
-				}
-			}
-			ret = path_converter(item, &path_args[n]);
-			Py_DECREF(item);
-			if (!ret)
+			path_arg = path_arg_vector_append_entry(&path_args);
+			if (!path_arg) {
+				PyErr_NoMemory();
+				Py_DECREF(item);
 				break;
-			n++;
+			}
+			memset(path_arg, 0, sizeof(*path_arg));
+			ret = path_converter(item, path_arg);
+			Py_DECREF(item);
+			if (!ret) {
+				path_args.size--;
+				break;
+			}
 		}
 		Py_DECREF(it);
 		if (PyErr_Occurred())
 			goto out;
 
-		paths = malloc_array(n, sizeof(*paths));
+		paths = malloc_array(path_args.size, sizeof(*paths));
 		if (!paths) {
 			PyErr_NoMemory();
 			goto out;
 		}
-		for (i = 0; i < n; i++)
-			paths[i] = path_args[i].path;
+		for (size_t i = 0; i < path_args.size; i++)
+			paths[i] = path_args.data[i].path;
 	}
-	err = drgn_program_load_debug_info(&self->prog, paths, n, load_default,
-					   load_main);
+	err = drgn_program_load_debug_info(&self->prog, paths, path_args.size,
+					   load_default, load_main);
 	free(paths);
 	if (err)
 		set_drgn_error(err);
 
 out:
-	for (i = 0; i < n; i++)
-		path_cleanup(&path_args[i]);
+	for (size_t i = 0; i < path_args.size; i++)
+		path_cleanup(&path_args.data[i]);
+	path_arg_vector_deinit(&path_args);
 	if (PyErr_Occurred())
 		return NULL;
 	Py_RETURN_NONE;
@@ -539,6 +544,36 @@ static PyObject *Program_read(Program *self, PyObject *args, PyObject *kwds)
 	}
 	return buf;
 }
+
+#define METHOD_READ(x, type)							\
+static PyObject *Program_read_##x(Program *self, PyObject *args,		\
+				  PyObject *kwds)				\
+{										\
+	static char *keywords[] = {"address", "physical", NULL};		\
+	struct drgn_error *err;							\
+	struct index_arg address = {};						\
+	int physical = 0;							\
+	type tmp;								\
+										\
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O&|p:read_"#x, keywords,	\
+					 index_converter, &address, &physical))	\
+	    return NULL;							\
+										\
+	err = drgn_program_read_##x(&self->prog, address.uvalue, physical,	\
+				    &tmp);					\
+	if (err)								\
+		return set_drgn_error(err);					\
+	if (sizeof(tmp) <= sizeof(unsigned long))				\
+		return PyLong_FromUnsignedLong(tmp);				\
+	else									\
+		return PyLong_FromUnsignedLongLong(tmp);			\
+}
+METHOD_READ(u8, uint8_t)
+METHOD_READ(u16, uint16_t)
+METHOD_READ(u32, uint32_t)
+METHOD_READ(u64, uint64_t)
+METHOD_READ(word, uint64_t)
+#undef METHOD_READ
 
 static PyObject *Program_find_type(Program *self, PyObject *args, PyObject *kwds)
 {
@@ -868,6 +903,15 @@ static PyMethodDef Program_methods[] = {
 	 drgn_Program___getitem___DOC},
 	{"read", (PyCFunction)Program_read, METH_VARARGS | METH_KEYWORDS,
 	 drgn_Program_read_DOC},
+#define METHOD_DEF_READ(x)						\
+	{"read_"#x, (PyCFunction)Program_read_##x,			\
+	 METH_VARARGS | METH_KEYWORDS, drgn_Program_read_##x##_DOC}
+	METHOD_DEF_READ(u8),
+	METHOD_DEF_READ(u16),
+	METHOD_DEF_READ(u32),
+	METHOD_DEF_READ(u64),
+	METHOD_DEF_READ(word),
+#undef METHOD_READ_U
 	{"type", (PyCFunction)Program_find_type, METH_VARARGS | METH_KEYWORDS,
 	 drgn_Program_type_DOC},
 	{"pointer_type", (PyCFunction)Program_pointer_type,

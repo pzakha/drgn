@@ -123,7 +123,7 @@ c_append_tagged_name(struct drgn_qualified_type qualified_type, size_t indent,
 		keyword = "enum";
 		break;
 	default:
-		DRGN_UNREACHABLE();
+		UNREACHABLE();
 	}
 
 	if (!append_tabs(indent, sb))
@@ -352,7 +352,7 @@ c_declare_variable(struct drgn_qualified_type qualified_type,
 	case DRGN_TYPE_FUNCTION:
 		return c_declare_function(qualified_type, name, indent, sb);
 	}
-	DRGN_UNREACHABLE();
+	UNREACHABLE();
 }
 
 static struct drgn_error *
@@ -507,7 +507,7 @@ c_define_type(struct drgn_qualified_type qualified_type, size_t indent,
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "function type cannot be formatted");
 	}
-	DRGN_UNREACHABLE();
+	UNREACHABLE();
 }
 
 static struct drgn_error *
@@ -725,7 +725,7 @@ c_format_int_object(const struct drgn_object *obj,
 		return NULL;
 	}
 	default:
-		DRGN_UNREACHABLE();
+		UNREACHABLE();
 	}
 }
 
@@ -1007,6 +1007,7 @@ compound_initializer_iter_next(struct initializer_iter *iter_,
 	struct compound_initializer_iter *iter =
 		container_of(iter_, struct compound_initializer_iter, iter);
 	struct compound_initializer_state *top;
+	uint64_t bit_offset;
 	struct drgn_type_member *member;
 	struct drgn_qualified_type member_type;
 
@@ -1022,6 +1023,7 @@ compound_initializer_iter_next(struct initializer_iter *iter_,
 			continue;
 		}
 
+		bit_offset = top->bit_offset;
 		member = top->member++;
 		err = drgn_member_type(member, &member_type);
 		if (err)
@@ -1037,7 +1039,7 @@ compound_initializer_iter_next(struct initializer_iter *iter_,
 		    !(iter->flags & DRGN_FORMAT_OBJECT_MEMBER_NAMES) ||
 		    !drgn_type_has_members(member_type.type)) {
 			err = drgn_object_slice(obj_ret, iter->obj, member_type,
-						top->bit_offset + member->bit_offset,
+						bit_offset + member->bit_offset,
 						member->bit_field_size);
 			if (err)
 				return err;
@@ -1062,7 +1064,7 @@ compound_initializer_iter_next(struct initializer_iter *iter_,
 			return &drgn_enomem;
 		new->member = drgn_type_members(member_type.type);
 		new->end = new->member + drgn_type_num_members(member_type.type);
-		new->bit_offset = top->bit_offset + member->bit_offset;
+		new->bit_offset = bit_offset + member->bit_offset;
 	}
 
 	*flags_ret = iter->member_flags;
@@ -1131,7 +1133,7 @@ c_format_compound_object(const struct drgn_object *obj,
 			keyword = "class";
 			break;
 		default:
-			DRGN_UNREACHABLE();
+			UNREACHABLE();
 		}
 		return drgn_error_format(DRGN_ERROR_TYPE,
 					 "cannot format incomplete %s object",
@@ -1597,7 +1599,7 @@ c_format_object_impl(const struct drgn_object *obj, size_t indent,
 	case DRGN_TYPE_FUNCTION:
 		return c_format_function_object(obj, sb);
 	default:
-		DRGN_UNREACHABLE();
+		UNREACHABLE();
 	}
 }
 
@@ -2679,7 +2681,7 @@ struct drgn_error *c_bit_offset(struct drgn_program *prog,
 			}
 			break;
 		default:
-			DRGN_UNREACHABLE();
+			UNREACHABLE();
 		}
 		state = token.kind;
 	}
@@ -2702,10 +2704,7 @@ struct drgn_error *c_integer_literal(struct drgn_object *res, uint64_t uvalue)
 	struct drgn_qualified_type qualified_type;
 	size_t i;
 
-	_Static_assert(sizeof(unsigned long long) == 8,
-		       "unsigned long long is not 64 bits");
-	bits = uvalue ? 64 - __builtin_clzll(uvalue) : 0;
-
+	bits = fls(uvalue);
 	qualified_type.qualifiers = 0;
 	for (i = 0; i < ARRAY_SIZE(types); i++) {
 		err = drgn_type_index_find_primitive(&res->prog->tindex,
@@ -2931,7 +2930,7 @@ c_corresponding_unsigned_type(struct drgn_type_index *tindex,
 						      DRGN_C_TYPE_UNSIGNED_LONG_LONG,
 						      ret);
 	default:
-		DRGN_UNREACHABLE();
+		UNREACHABLE();
 	}
 }
 
