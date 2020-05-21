@@ -1,4 +1,4 @@
-// Copyright 2018-2019 - Omar Sandoval
+// Copyright (c) Facebook, Inc. and its affiliates.
 // SPDX-License-Identifier: GPL-3.0+
 
 #ifndef DRGN_LINUX_KERNEL_H
@@ -24,6 +24,8 @@ struct drgn_error *proc_kallsyms_symbol_addr(const char *name,
 
 struct drgn_error *read_vmcoreinfo_fallback(struct drgn_memory_reader *reader,
 					    struct vmcoreinfo *ret);
+struct drgn_error *linux_kernel_get_thread_size(struct drgn_program *prog,
+						uint64_t *ret);
 
 struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 					    const char *filename,
