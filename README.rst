@@ -58,11 +58,15 @@ Installation
 
 Install dependencies:
 
-Arch Linux::
+Arch Linux:
+
+.. code-block:: console
 
     $ sudo pacman -S --needed autoconf automake bison bzip2 flex gawk gcc libtool make pkgconf python python-setuptools xz zlib
 
-Debian/Ubuntu::
+Debian/Ubuntu:
+
+.. code-block:: console
 
     $ sudo apt-get install autoconf automake bison flex gawk gcc libbz2-dev liblzma-dev libtool make pkgconf python3 python3-dev python3-setuptools zlib1g-dev
 
@@ -70,7 +74,9 @@ Note that Debian Stretch, Ubuntu Trusty, and Ubuntu Xenial (and older) ship
 Python versions which are too old. Python 3.6 or newer must be installed
 manually.
 
-Fedora::
+Fedora:
+
+.. code-block:: console
 
     $ sudo dnf install autoconf automake bison bzip2-devel flex gawk gcc libtool make pkgconf python3 python3-devel python3-setuptools xz-devel zlib-devel
 

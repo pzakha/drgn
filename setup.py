@@ -2,6 +2,9 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 # SPDX-License-Identifier: GPL-3.0+
 
+# setuptools must be imported before distutils (see pypa/setuptools#2230).
+from setuptools import setup, find_packages, Command
+
 import contextlib
 from distutils import log
 from distutils.command.build import build as _build
@@ -12,7 +15,6 @@ import os
 import os.path
 import re
 import pkg_resources
-from setuptools import setup, find_packages, Command
 from setuptools.command.build_ext import build_ext as _build_ext
 from setuptools.command.egg_info import egg_info as _egg_info
 from setuptools.extension import Extension
@@ -124,7 +126,7 @@ class egg_info(_egg_info):
 class test(Command):
     description = "run unit tests after in-place build"
 
-    KERNELS = ["5.7", "5.6", "5.5", "5.4", "4.19", "4.14", "4.9", "4.4"]
+    KERNELS = ["5.8", "5.7", "5.6", "5.5", "5.4", "4.19", "4.14", "4.9", "4.4"]
 
     user_options = [
         (
