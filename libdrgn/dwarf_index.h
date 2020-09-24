@@ -12,8 +12,9 @@
 #ifndef DRGN_DWARF_INDEX_H
 #define DRGN_DWARF_INDEX_H
 
+#include <elfutils/libdw.h>
 #include <elfutils/libdwfl.h>
-#include <libelf.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,10 +28,11 @@ typedef struct {} omp_lock_t;
 #define omp_unset_lock(lock) do {} while (0)
 #endif
 
-#include "drgn.h"
 #include "hash_table.h"
-#include "string_builder.h"
 #include "vector.h"
+
+struct drgn_debug_info_module;
+struct drgn_error;
 
 /**
  * @ingroup Internals
@@ -54,17 +56,44 @@ typedef struct {} omp_lock_t;
  * @{
  */
 
-extern const Dwfl_Callbacks drgn_dwfl_callbacks;
-extern const Dwfl_Callbacks drgn_linux_proc_dwfl_callbacks;
-extern const Dwfl_Callbacks drgn_userspace_core_dump_dwfl_callbacks;
+/*
+ * An indexed DIE.
+ *
+ * DIEs with the same name but different tags or files are considered distinct.
+ * We only compare the hash of the file name, not the string value, because a
+ * 64-bit collision is unlikely enough, especially when also considering the
+ * name and tag.
+ */
+struct drgn_dwarf_index_die {
+	/*
+	 * The next DIE with the same name (as an index into
+	 * drgn_dwarf_index_shard::dies), or UINT32_MAX if this is the last DIE.
+	 */
+	uint32_t next;
+	uint8_t tag;
+	union {
+		/*
+		 * If tag != DW_TAG_namespace (namespaces are merged, so they
+		 * don't need this).
+		 */
+		uint64_t file_name_hash;
+		/* If tag == DW_TAG_namespace. */
+		struct drgn_dwarf_index_namespace *namespace;
+	};
+	Dwfl_Module *module;
+	size_t offset;
+};
 
-struct drgn_dwarf_index_die;
-DEFINE_HASH_MAP_TYPE(drgn_dwarf_index_die_map, struct string, size_t)
+DEFINE_HASH_MAP_TYPE(drgn_dwarf_index_die_map, struct string, uint32_t)
 DEFINE_VECTOR_TYPE(drgn_dwarf_index_die_vector, struct drgn_dwarf_index_die)
 
 struct drgn_dwarf_index_shard {
 	/** @privatesection */
 	omp_lock_t lock;
+	/*
+	 * Map from name to list of DIEs with that name (as the index in
+	 * drgn_dwarf_index_shard::dies of the first DIE with that name).
+	 */
 	struct drgn_dwarf_index_die_map map;
 	/*
 	 * We store all entries in a shard as a single array, which is more
@@ -75,88 +104,48 @@ struct drgn_dwarf_index_shard {
 
 #define DRGN_DWARF_INDEX_SHARD_BITS 8
 
-/** State of a @ref drgn_dwarf_module or a @c Dwfl_Module. */
-enum drgn_dwarf_module_state {
-	/** Reported but not indexed. */
-	DRGN_DWARF_MODULE_NEW,
-	/** Reported and will be indexed on success. */
-	DRGN_DWARF_MODULE_INDEXING,
-	/** Indexed. Must not be freed until @ref drgn_dwarf_index_deinit(). */
-	DRGN_DWARF_MODULE_INDEXED,
-};
-
-DEFINE_VECTOR_TYPE(dwfl_module_vector, Dwfl_Module *)
-
-/**
- * A module reported to a @ref drgn_dwarf_index.
- *
- * Conceptually, a module is an ELF file loaded at a specific address range (or
- * not loaded).
- *
- * Each (file, address range) referenced by a @ref drgn_dwarf_index is uniquely
- * represented by one @c Dwfl_Module. Files are identified by canonical path.
- *
- * Each (binary, address range) is uniquely represented by a @ref
- * drgn_dwarf_module. Binaries are identified by build ID; note that a single
- * binary may be represented by multiple files (e.g., a stripped binary and its
- * corresponding separate debug info file). If a file does not have a build ID,
- * it is considered a different binary from other files with different canonical
- * paths.
- */
-struct drgn_dwarf_module {
-	/** Allocated with @c malloc() if @c build_id_len is non-zero. */
-	void *build_id;
-	/** Zero if the module does not have a build ID. */
-	size_t build_id_len;
-	/** Load address range, or both 0 if not loaded. */
-	uint64_t start, end;
-	/** Optional module name allocated with @c malloc(). */
-	char *name;
-	enum drgn_dwarf_module_state state;
-	/**
-	 * Candidate <tt>Dwfl_Module</tt>s which were reported for this module.
-	 *
-	 * One of these will be indexed. Once the module is indexed, this is
-	 * always empty.
+/* A DIE with a DW_AT_specification attribute. */
+struct drgn_dwarf_index_specification {
+	/*
+	 * Address of non-defining declaration DIE referenced by
+	 * DW_AT_specification.
 	 */
-	struct dwfl_module_vector dwfl_modules;
+	uintptr_t declaration;
+	/* Module and offset of DIE. */
+	Dwfl_Module *module;
+	size_t offset;
 };
 
-/**
- * State tracked for each @c Dwfl_Module.
- *
- * @c path, @c elf, and @c fd are used when an ELF file was reported to a @ref
- * drgn_dwarf_index so that we can report the ELF file to libdwfl later.
- */
-struct drgn_dwfl_module_userdata {
-	char *path;
-	Elf *elf;
-	int fd;
-	enum drgn_dwarf_module_state state;
-};
-
-DEFINE_VECTOR_TYPE(drgn_dwarf_module_vector, struct drgn_dwarf_module *)
-
-struct drgn_dwarf_module_key {
-	const void *build_id;
-	size_t build_id_len;
-	uint64_t start, end;
-};
-
-static inline struct drgn_dwarf_module_key
-drgn_dwarf_module_key(struct drgn_dwarf_module * const *entry)
+static inline uintptr_t
+drgn_dwarf_index_specification_to_key(const struct drgn_dwarf_index_specification *entry)
 {
-	return (struct drgn_dwarf_module_key){
-		.build_id = (*entry)->build_id,
-		.build_id_len = (*entry)->build_id_len,
-		.start = (*entry)->start,
-		.end = (*entry)->end,
-	};
+	return entry->declaration;
 }
-DEFINE_HASH_TABLE_TYPE(drgn_dwarf_module_table, struct drgn_dwarf_module *,
-		       drgn_dwarf_module_key)
 
-DEFINE_HASH_SET_TYPE(c_string_set, const char *)
+DEFINE_HASH_TABLE_TYPE(drgn_dwarf_index_specification_map,
+		       struct drgn_dwarf_index_specification,
+		       drgn_dwarf_index_specification_to_key)
+
+DEFINE_VECTOR_TYPE(drgn_dwarf_index_cu_vector, struct drgn_dwarf_index_cu)
+
+DEFINE_VECTOR_TYPE(drgn_dwarf_index_pending_die_vector,
+		   struct drgn_dwarf_index_pending_die)
+
+/** Mapping from names/tags to DIEs/nested namespaces. */
+struct drgn_dwarf_index_namespace {
+	/**
+	 * Index shards.
+	 *
+	 * This is sharded to reduce lock contention.
+	 */
+	struct drgn_dwarf_index_shard shards[1 << DRGN_DWARF_INDEX_SHARD_BITS];
+	/** Parent DWARF index. */
+	struct drgn_dwarf_index *dindex;
+	/** DIEs we have not indexed yet. */
+	struct drgn_dwarf_index_pending_die_vector pending_dies;
+	/** Saved error from a previous index. */
+	struct drgn_error *saved_err;
+};
 
 /**
  * Fast index of DWARF debugging information.
@@ -169,50 +158,23 @@ DEFINE_HASH_SET_TYPE(c_string_set, const char *)
  * Searches in the index are done with a @ref drgn_dwarf_index_iterator.
  */
 struct drgn_dwarf_index {
+	/** Global namespace. */
+	struct drgn_dwarf_index_namespace global;
 	/**
-	 * Index shards.
+	 * Map from address of DIE referenced by DW_AT_specification to DIE that
+	 * references it. This is used to resolve DIEs with DW_AT_declaration to
+	 * their definition.
 	 *
-	 * This is sharded to reduce lock contention.
+	 * This is not sharded because there typically aren't enough of these in
+	 * a program to cause contention.
 	 */
-	struct drgn_dwarf_index_shard shards[1 << DRGN_DWARF_INDEX_SHARD_BITS];
-	Dwfl *dwfl;
-	/**
-	 * Formatted errors reported by @ref drgn_dwarf_index_report_error().
-	 */
-	struct string_builder errors;
-	/**
-	 * Number of errors reported by @ref drgn_dwarf_index_report_error().
-	 */
-	unsigned int num_errors;
-	/** Maximum number of errors to report before truncating. */
-	unsigned int max_errors;
-	/**
-	 * Modules keyed by build ID and address range.
-	 *
-	 * Every reported module is either here or in @ref no_build_id. While
-	 * reporting modules, these include indexed and unindexed modules.
-	 */
-	struct drgn_dwarf_module_table module_table;
-	/** Modules that don't have a build ID. */
-	struct drgn_dwarf_module_vector no_build_id;
-	/**
-	 * Names of indexed modules.
-	 *
-	 * The entries in this set are @ref drgn_dwarf_module::name, so they
-	 * should not be freed.
-	 */
-	struct c_string_set names;
+	struct drgn_dwarf_index_specification_map specifications;
+	/** Indexed compilation units. */
+	struct drgn_dwarf_index_cu_vector cus;
 };
 
-/**
- * Initialize a @ref drgn_dwarf_index.
- *
- * @param[in] callbacks One of @ref drgn_dwfl_callbacks, @ref
- * drgn_linux_proc_dwfl_callbacks, or @ref
- * drgn_userspace_core_dump_dwfl_callbacks.
- */
-struct drgn_error *drgn_dwarf_index_init(struct drgn_dwarf_index *dindex,
-					 const Dwfl_Callbacks *callbacks);
+/** Initialize a @ref drgn_dwarf_index. */
+void drgn_dwarf_index_init(struct drgn_dwarf_index *dindex);
 
 /**
  * Deinitialize a @ref drgn_dwarf_index.
@@ -222,109 +184,78 @@ struct drgn_error *drgn_dwarf_index_init(struct drgn_dwarf_index *dindex,
  */
 void drgn_dwarf_index_deinit(struct drgn_dwarf_index *dindex);
 
-/**
- * Start reporting modules to a @ref drgn_dwarf_index.
- *
- * This must be paired with a call to either @ref drgn_dwarf_index_report_end()
- * or @ref drgn_dwarf_index_report_abort().
- */
-void drgn_dwarf_index_report_begin(struct drgn_dwarf_index *dindex);
+/** State tracked while updating a @ref drgn_dwarf_index. */
+struct drgn_dwarf_index_update_state {
+	struct drgn_dwarf_index *dindex;
+	size_t old_cus_size;
+	struct drgn_error *err;
+};
 
 /**
- * Report a non-fatal error to a @ref drgn_dwarf_index.
+ * Prepare to update a @ref drgn_dwarf_index.
  *
- * These errors are reported by @ref drgn_dwarf_index_report_end() in the @ref
- * DRGN_ERROR_MISSING_DEBUG_INFO error.
+ * @param[out] state Initialized update state. Must be passed to @ref
+ * drgn_dwarf_index_update_end().
+ */
+void drgn_dwarf_index_update_begin(struct drgn_dwarf_index_update_state *state,
+				   struct drgn_dwarf_index *dindex);
+
+/**
+ * Finish updating a @ref drgn_dwarf_index.
  *
- * @param[name] name An optional module name to prefix to the error message.
- * @param[message] message An optional message with additional context to prefix
- * to the error message.
- * @param[err] err The error to report. This may be @c NULL if @p name and @p
- * message provide sufficient information.
- * @return @c NULL on success, @ref drgn_enomem if the error could not be
- * reported.
+ * This should be called once all of the tasks created by @ref
+ * drgn_dwarf_index_read_module() have completed (even if the update was
+ * cancelled).
+ *
+ * If the update was not cancelled, this finishes indexing all modules reported
+ * by @ref drgn_dwarf_index_read_module(). If it was cancelled or there is an
+ * error while indexing, this rolls back the index and removes the newly
+ * reported modules.
+ *
+ * @return @c NULL on success, non-@c NULL if the update was cancelled or there
+ * was another error.
  */
 struct drgn_error *
-drgn_dwarf_index_report_error(struct drgn_dwarf_index *dindex, const char *name,
-			      const char *message, struct drgn_error *err);
+drgn_dwarf_index_update_end(struct drgn_dwarf_index_update_state *state);
 
 /**
- * Report a module to a @ref drgn_dwarf_index from an ELF file.
+ * Cancel an update of a @ref drgn_dwarf_index.
  *
- * This takes ownership of @p fd and @p elf on either success or failure. They
- * should not be used (including closed or freed) after this returns.
+ * This should be called if there is a fatal error and the update must be
+ * aborted.
  *
- * If this fails, @ref drgn_dwarf_index_report_abort() must be called.
- *
- * @param[in] path The path to the file.
- * @param[in] fd A file descriptor referring to the file.
- * @param[in] elf The Elf handle of the file.
- * @param[in] start The (inclusive) start address of the loaded file, or 0 if
- * the file is not loaded.
- * @param[in] end The (exclusive) end address of the loaded file, or 0 if the
- * file is not loaded.
- * @param[in] name An optional name for the module. This is only used for @ref
- * drgn_dwarf_index_is_indexed().
- * @param[out] new_ret Whether the module was newly created and reported. This
- * is @c false if a module with the same build ID and address range was already
- * indexed or a file with the same path and address range was already reported.
+ * @param[in] err Error to report. This will be returned from @ref
+ * drgn_dwarf_index_update_end(). If an error has already been reported, this
+ * error is destroyed.
  */
-struct drgn_error *drgn_dwarf_index_report_elf(struct drgn_dwarf_index *dindex,
-					       const char *path, int fd,
-					       Elf *elf, uint64_t start,
-					       uint64_t end, const char *name,
-					       bool *new_ret);
+void drgn_dwarf_index_update_cancel(struct drgn_dwarf_index_update_state *state,
+				    struct drgn_error *err);
 
 /**
- * Stop reporting modules to a @ref drgn_dwarf_index and index new DWARF
- * information.
+ * Return whether an update of a @ref drgn_dwarf_index has been cancelled by
+ * @ref drgn_dwarf_index_update_cancel().
  *
- * This parses and indexes the debugging information for all modules that have
- * not yet been indexed.
- *
- * If debug information was not available for one or more modules, a @ref
- * DRGN_ERROR_MISSING_DEBUG_INFO error is returned, those modules are freed, and
- * all other modules are added to the index.
- *
- * On any other error, no new debugging information is indexed and all unindexed
- * modules are freed.
- *
- * @param[in] report_from_dwfl Whether any <tt>Dwfl_Module</tt>s were reported
- * to @ref drgn_dwarf_index::dwfl directly via libdwfl. In that case, we need to
- * report those to the DWARF index, as well.
+ * Because updating is parallelized, this allows tasks other than the one that
+ * encountered the error to "fail fast".
  */
-struct drgn_error *drgn_dwarf_index_report_end(struct drgn_dwarf_index *dindex,
-					       bool report_from_dwfl);
+static inline bool
+drgn_dwarf_index_update_cancelled(struct drgn_dwarf_index_update_state *state)
+{
+	/*
+	 * No need for omp critical/omp atomic since this is a best-effort
+	 * optimization.
+	 */
+	return state->err != NULL;
+}
 
 /**
- * Index new DWARF information and continue reporting.
+ * Read a module for updating a @ref drgn_dwarf_index.
  *
- * This is similar to @ref drgn_dwarf_index_report_end() except that it does not
- * finish reporting or return a @ref DRGN_ERROR_MISSING_DEBUG_INFO error. @ref
- * After this is called, more modules may be reported. @ref
- * drgn_dwarf_index_report_end() or @ref drgn_dwarf_index_report_abort() must
- * still be called.
+ * This creates OpenMP tasks to begin indexing the module. It may cancel the
+ * update.
  */
-struct drgn_error *drgn_dwarf_index_flush(struct drgn_dwarf_index *dindex,
-					  bool report_from_dwfl);
-
-/**
- * Stop reporting modules to a @ref drgn_dwarf_index and free all unindexed
- * modules.
- *
- * This also clears all errors reported by @ref drgn_dwarf_index_report_error().
- *
- * This should be called instead of @ref drgn_dwarf_index_report_end() if a
- * fatal error is encountered while reporting modules.
- */
-void drgn_dwarf_index_report_abort(struct drgn_dwarf_index *dindex);
-
-/**
- * Return whether a @ref drgn_dwarf_index has indexed a module with the given
- * name.
- */
-bool drgn_dwarf_index_is_indexed(struct drgn_dwarf_index *dindex,
-				 const char *name);
+void drgn_dwarf_index_read_module(struct drgn_dwarf_index_update_state *state,
+				  struct drgn_debug_info_module *module);
 
 /**
  * Iterator over DWARF debugging information.
@@ -334,11 +265,11 @@ bool drgn_dwarf_index_is_indexed(struct drgn_dwarf_index *dindex,
  */
 struct drgn_dwarf_index_iterator {
 	/** @privatesection */
-	struct drgn_dwarf_index *dindex;
+	struct drgn_dwarf_index_namespace *ns;
 	const uint64_t *tags;
 	size_t num_tags;
 	size_t shard;
-	size_t index;
+	uint32_t index;
 	bool any_name;
 };
 
@@ -351,11 +282,13 @@ struct drgn_dwarf_index_iterator {
  * @param[in] name_len Length of @c name.
  * @param[in] tags List of DIE tags to search for.
  * @param[in] num_tags Number of tags in @p tags, or zero to search for any tag.
+ * @return @c NULL on success, non-@c NULL on error.
  */
-void drgn_dwarf_index_iterator_init(struct drgn_dwarf_index_iterator *it,
-				    struct drgn_dwarf_index *dindex,
-				    const char *name, size_t name_len,
-				    const uint64_t *tags, size_t num_tags);
+struct drgn_error *
+drgn_dwarf_index_iterator_init(struct drgn_dwarf_index_iterator *it,
+			       struct drgn_dwarf_index_namespace *ns,
+			       const char *name, size_t name_len,
+			       const uint64_t *tags, size_t num_tags);
 
 /**
  * Get the next matching DIE from a DWARF index iterator.
@@ -367,18 +300,24 @@ void drgn_dwarf_index_iterator_init(struct drgn_dwarf_index_iterator *it,
  * DW_TAG_enumerator DIEs.
  *
  * @param[in] it DWARF index iterator.
+ * @return Next DIE, or @c NULL if there are no more matching DIEs.
+ */
+struct drgn_dwarf_index_die *
+drgn_dwarf_index_iterator_next(struct drgn_dwarf_index_iterator *it);
+
+/**
+ * Get a @c Dwarf_Die from a @ref drgn_dwarf_index_die.
+ *
+ * @param[in] die Indexed DIE.
  * @param[out] die_ret Returned DIE.
  * @param[out] bias_ret Returned difference between addresses in the loaded
  * module and addresses in the debugging information. This may be @c NULL if it
  * is not needed.
- * @return @c NULL on success, non-@c NULL on error. In particular, when there
- * are no more matching DIEs, @p die_ret is not modified and an error with code
- * @ref DRGN_ERROR_STOP is returned; this @ref DRGN_ERROR_STOP error does not
- * have to be passed to @ref drgn_error_destroy().
+ * @return @c NULL on success, non-@c NULL on error.
  */
-struct drgn_error *
-drgn_dwarf_index_iterator_next(struct drgn_dwarf_index_iterator *it,
-			       Dwarf_Die *die_ret, uint64_t *bias_ret);
+struct drgn_error *drgn_dwarf_index_get_die(struct drgn_dwarf_index_die *die,
+					    Dwarf_Die *die_ret,
+					    uint64_t *bias_ret);
 
 /** @} */
 

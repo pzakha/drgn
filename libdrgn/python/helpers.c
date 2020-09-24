@@ -3,6 +3,7 @@
 
 #include "drgnpy.h"
 #include "../helpers.h"
+#include "../program.h"
 
 PyObject *drgnpy_linux_helper_read_vm(PyObject *self, PyObject *args,
 				      PyObject *kwds)
@@ -141,7 +142,7 @@ static int prog_or_pid_ns_converter(PyObject *o, void *p)
 DrgnObject *drgnpy_linux_helper_find_pid(PyObject *self, PyObject *args,
 					  PyObject *kwds)
 {
-	static char *keywords[] = {"ns", "pid", NULL};
+	static char *keywords[] = {"prog_or_ns", "pid", NULL};
 	struct drgn_error *err;
 	struct prog_or_ns_arg prog_or_ns;
 	struct index_arg pid = {};
@@ -217,24 +218,6 @@ DrgnObject *drgnpy_linux_helper_find_task(PyObject *self, PyObject *args,
 out:
 	prog_or_ns_cleanup(&prog_or_ns);
 	return res;
-}
-
-PyObject *drgnpy_linux_helper_task_state_to_char(PyObject *self, PyObject *args,
-						 PyObject *kwds)
-{
-	static char *keywords[] = {"task", NULL};
-	struct drgn_error *err;
-	DrgnObject *task;
-	char c;
-
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!:task_state_to_char",
-					 keywords, &DrgnObject_type, &task))
-		return NULL;
-
-	err = linux_helper_task_state_to_char(&task->obj, &c);
-	if (err)
-		return set_drgn_error(err);
-	return PyUnicode_FromStringAndSize(&c, 1);
 }
 
 PyObject *drgnpy_linux_helper_kaslr_offset(PyObject *self, PyObject *args,

@@ -1,19 +1,14 @@
 // Copyright (c) Facebook, Inc. and its affiliates.
 // SPDX-License-Identifier: GPL-3.0+
 
-#include "internal.h"
+#include <dwarf.h>
+
+#include "error.h"
 #include "language.h"
 
 const struct drgn_language drgn_languages[] = {
 	[DRGN_LANGUAGE_C] = {
 		.name = "C",
-		.void_type = {
-			{
-				.kind = DRGN_TYPE_VOID,
-				.primitive = DRGN_C_TYPE_VOID,
-				.language = &drgn_language_c,
-			},
-		},
 		.format_type_name = c_format_type_name,
 		.format_type = c_format_type,
 		.format_object = c_format_object,
@@ -41,13 +36,6 @@ const struct drgn_language drgn_languages[] = {
 	},
 	[DRGN_LANGUAGE_CPP] = {
 		.name = "C++",
-		.void_type = {
-			{
-				.kind = DRGN_TYPE_VOID,
-				.primitive = DRGN_C_TYPE_VOID,
-				.language = &drgn_language_cpp,
-			},
-		},
 		.format_type_name = c_format_type_name,
 		.format_type = c_format_type,
 		.format_object = c_format_object,

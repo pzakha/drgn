@@ -1,32 +1,32 @@
 // Copyright (c) Facebook, Inc. and its affiliates.
 // SPDX-License-Identifier: GPL-3.0+
 
+#include <assert.h>
 #include <byteswap.h>
+#include <dwarf.h>
+#include <elf.h>
+#include <elfutils/libdw.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <gelf.h>
 #include <inttypes.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/statfs.h>
 #include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/vfs.h>
 
-#include "internal.h"
+#include "debug_info.h"
 #include "dwarf_index.h"
-#include "dwarf_info_cache.h"
+#include "error.h"
 #include "language.h"
 #include "linux_kernel.h"
 #include "memory_reader.h"
 #include "object_index.h"
 #include "program.h"
-#include "read.h"
-#include "string_builder.h"
 #include "symbol.h"
-#include "type_index.h"
 #include "vector.h"
+#include "util.h"
 
 DEFINE_VECTOR_FUNCTIONS(drgn_prstatus_vector)
 DEFINE_HASH_TABLE_FUNCTIONS(drgn_prstatus_map, hash_pair_int_type,
@@ -63,8 +63,6 @@ void drgn_program_set_platform(struct drgn_program *prog,
 	if (!prog->has_platform) {
 		prog->platform = *platform;
 		prog->has_platform = true;
-		prog->tindex.word_size =
-			platform->flags & DRGN_PLATFORM_IS_64_BIT ? 8 : 4;
 	}
 }
 
@@ -73,7 +71,7 @@ void drgn_program_init(struct drgn_program *prog,
 {
 	memset(prog, 0, sizeof(*prog));
 	drgn_memory_reader_init(&prog->reader);
-	drgn_type_index_init(&prog->tindex);
+	drgn_program_init_types(prog);
 	drgn_object_index_init(&prog->oindex);
 	prog->core_fd = -1;
 	if (platform)
@@ -82,7 +80,6 @@ void drgn_program_init(struct drgn_program *prog,
 
 void drgn_program_deinit(struct drgn_program *prog)
 {
-	free(prog->task_state_chars);
 	if (prog->prstatus_cached) {
 		if (prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL)
 			drgn_prstatus_vector_deinit(&prog->prstatus_vector);
@@ -92,7 +89,7 @@ void drgn_program_deinit(struct drgn_program *prog)
 	free(prog->pgtable_it);
 
 	drgn_object_index_deinit(&prog->oindex);
-	drgn_type_index_deinit(&prog->tindex);
+	drgn_program_deinit_types(prog);
 	drgn_memory_reader_deinit(&prog->reader);
 
 	free(prog->file_segments);
@@ -105,7 +102,7 @@ void drgn_program_deinit(struct drgn_program *prog)
 	if (prog->core_fd != -1)
 		close(prog->core_fd);
 
-	drgn_dwarf_info_cache_destroy(prog->_dicache);
+	drgn_debug_info_destroy(prog->_dbinfo);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
@@ -137,13 +134,6 @@ drgn_program_add_memory_segment(struct drgn_program *prog, uint64_t address,
 {
 	return drgn_memory_reader_add_segment(&prog->reader, address, size,
 					      read_fn, arg, physical);
-}
-
-LIBDRGN_PUBLIC struct drgn_error *
-drgn_program_add_type_finder(struct drgn_program *prog, drgn_type_find_fn fn,
-			     void *arg)
-{
-	return drgn_type_index_add_finder(&prog->tindex, fn, arg);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
@@ -536,138 +526,67 @@ out_fd:
 	return err;
 }
 
-static struct drgn_error *drgn_program_get_dindex(struct drgn_program *prog,
-						  struct drgn_dwarf_index **ret)
+struct drgn_error *drgn_program_get_dbinfo(struct drgn_program *prog,
+					   struct drgn_debug_info **ret)
 {
 	struct drgn_error *err;
 
-	if (!prog->_dicache) {
-		const Dwfl_Callbacks *dwfl_callbacks;
-		struct drgn_dwarf_info_cache *dicache;
-
-		if (prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL)
-			dwfl_callbacks = &drgn_dwfl_callbacks;
-		else if (prog->flags & DRGN_PROGRAM_IS_LIVE)
-			dwfl_callbacks = &drgn_linux_proc_dwfl_callbacks;
-		else
-			dwfl_callbacks = &drgn_userspace_core_dump_dwfl_callbacks;
-
-		err = drgn_dwarf_info_cache_create(&prog->tindex,
-						   dwfl_callbacks, &dicache);
+	if (!prog->_dbinfo) {
+		struct drgn_debug_info *dbinfo;
+		err = drgn_debug_info_create(prog, &dbinfo);
 		if (err)
 			return err;
-		err = drgn_program_add_type_finder(prog, drgn_dwarf_type_find,
-						   dicache);
-		if (err) {
-			drgn_dwarf_info_cache_destroy(dicache);
-			return err;
-		}
 		err = drgn_program_add_object_finder(prog,
-						     drgn_dwarf_object_find,
-						     dicache);
+						     drgn_debug_info_find_object,
+						     dbinfo);
 		if (err) {
-			drgn_type_index_remove_finder(&prog->tindex);
-			drgn_dwarf_info_cache_destroy(dicache);
+			drgn_debug_info_destroy(dbinfo);
 			return err;
 		}
-		prog->_dicache = dicache;
-	}
-	*ret = &prog->_dicache->dindex;
-	return NULL;
-}
-
-struct drgn_error *drgn_program_get_dwfl(struct drgn_program *prog, Dwfl **ret)
-{
-	struct drgn_error *err;
-	struct drgn_dwarf_index *dindex;
-
-	err = drgn_program_get_dindex(prog, &dindex);
-	if (err)
-		return err;
-	*ret = dindex->dwfl;
-	return NULL;
-}
-
-static struct drgn_error *
-userspace_report_debug_info(struct drgn_program *prog,
-			    struct drgn_dwarf_index *dindex,
-			    const char **paths, size_t n,
-			    bool report_default)
-{
-	struct drgn_error *err;
-	size_t i;
-
-	for (i = 0; i < n; i++) {
-		int fd;
-		Elf *elf;
-
-		err = open_elf_file(paths[i], &fd, &elf);
+		err = drgn_program_add_type_finder(prog,
+						   drgn_debug_info_find_type,
+						   dbinfo);
 		if (err) {
-			err = drgn_dwarf_index_report_error(dindex, paths[i],
-							    NULL, err);
-			if (err)
-				return err;
-			continue;
-		}
-		/*
-		 * We haven't implemented a way to get the load address for
-		 * anything reported here, so for now we report it as unloaded.
-		 */
-		err = drgn_dwarf_index_report_elf(dindex, paths[i], fd, elf, 0,
-						  0, NULL, NULL);
-		if (err)
+			drgn_object_index_remove_finder(&prog->oindex);
+			drgn_debug_info_destroy(dbinfo);
 			return err;
-	}
-
-	if (report_default) {
-		if (prog->flags & DRGN_PROGRAM_IS_LIVE) {
-			int ret;
-
-			ret = dwfl_linux_proc_report(dindex->dwfl, prog->pid);
-			if (ret == -1) {
-				return drgn_error_libdwfl();
-			} else if (ret) {
-				return drgn_error_create_os("dwfl_linux_proc_report",
-							    ret, NULL);
-			}
-		} else if (dwfl_core_file_report(dindex->dwfl, prog->core,
-						 NULL) == -1) {
-			return drgn_error_libdwfl();
 		}
+		prog->_dbinfo = dbinfo;
 	}
+	*ret = prog->_dbinfo;
 	return NULL;
 }
 
 /* Set the default language from the language of "main". */
-static void drgn_program_set_language_from_main(struct drgn_program *prog,
-						struct drgn_dwarf_index *dindex)
+static void drgn_program_set_language_from_main(struct drgn_debug_info *dbinfo)
 {
 	struct drgn_error *err;
 	struct drgn_dwarf_index_iterator it;
 	static const uint64_t tags[] = { DW_TAG_subprogram };
-
-	drgn_dwarf_index_iterator_init(&it, dindex, "main", strlen("main"),
-				       tags, ARRAY_SIZE(tags));
-	for (;;) {
+	err = drgn_dwarf_index_iterator_init(&it, &dbinfo->dindex.global,
+					     "main", strlen("main"), tags,
+					     ARRAY_SIZE(tags));
+	if (err) {
+		drgn_error_destroy(err);
+		return;
+	}
+	struct drgn_dwarf_index_die *index_die;
+	while ((index_die = drgn_dwarf_index_iterator_next(&it))) {
 		Dwarf_Die die;
-		const struct drgn_language *lang;
-
-		err = drgn_dwarf_index_iterator_next(&it, &die, NULL);
-		if (err == &drgn_stop) {
-			break;
-		} else if (err) {
+		err = drgn_dwarf_index_get_die(index_die, &die, NULL);
+		if (err) {
 			drgn_error_destroy(err);
 			continue;
 		}
 
+		const struct drgn_language *lang;
 		err = drgn_language_from_die(&die, &lang);
 		if (err) {
 			drgn_error_destroy(err);
 			continue;
 		}
-
 		if (lang) {
-			prog->lang = lang;
+			dbinfo->prog->lang = lang;
 			break;
 		}
 	}
@@ -698,65 +617,56 @@ drgn_program_load_debug_info(struct drgn_program *prog, const char **paths,
 			     size_t n, bool load_default, bool load_main)
 {
 	struct drgn_error *err;
-	struct drgn_dwarf_index *dindex;
-	bool report_from_dwfl;
 
 	if (!n && !load_default && !load_main)
 		return NULL;
 
-	if (load_default)
-		load_main = true;
-
-	err = drgn_program_get_dindex(prog, &dindex);
+	struct drgn_debug_info *dbinfo;
+	err = drgn_program_get_dbinfo(prog, &dbinfo);
 	if (err)
 		return err;
 
-	drgn_dwarf_index_report_begin(dindex);
-	if (prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) {
-		err = linux_kernel_report_debug_info(prog, dindex, paths, n,
-						     load_default, load_main);
-	} else {
-		err = userspace_report_debug_info(prog, dindex, paths, n,
-						  load_default);
-	}
-	if (err) {
-		drgn_dwarf_index_report_abort(dindex);
-		return err;
-	}
-	report_from_dwfl = (!(prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
-			    load_main);
-	err = drgn_dwarf_index_report_end(dindex, report_from_dwfl);
+	err = drgn_debug_info_load(dbinfo, paths, n, load_default, load_main);
 	if ((!err || err->code == DRGN_ERROR_MISSING_DEBUG_INFO)) {
 		if (!prog->lang &&
 		    !(prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL))
-			drgn_program_set_language_from_main(prog, dindex);
+			drgn_program_set_language_from_main(dbinfo);
 		if (!prog->has_platform) {
-			dwfl_getdwarf(dindex->dwfl,
+			dwfl_getdwarf(dbinfo->dwfl,
 				      drgn_set_platform_from_dwarf, prog, 0);
 		}
 	}
 	return err;
 }
 
-static uint32_t get_prstatus_pid(struct drgn_program *prog, const char *data,
-				 size_t size)
+static struct drgn_error *get_prstatus_pid(struct drgn_program *prog, const char *data,
+					   size_t size, uint32_t *ret)
 {
+	bool is_64_bit, bswap;
+	struct drgn_error *err = drgn_program_is_64_bit(prog, &is_64_bit);
+	if (err)
+		return err;
+	err = drgn_program_bswap(prog, &bswap);
+	if (err)
+		return err;
+
+	size_t offset = is_64_bit ? 32 : 24;
 	uint32_t pr_pid;
-	memcpy(&pr_pid, data + (drgn_program_is_64_bit(prog) ? 32 : 24),
-	       sizeof(pr_pid));
-	if (drgn_program_bswap(prog))
+	if (size < offset + sizeof(pr_pid)) {
+		return drgn_error_create(DRGN_ERROR_OTHER,
+					 "NT_PRSTATUS is truncated");
+	}
+	memcpy(&pr_pid, data + offset, sizeof(pr_pid));
+	if (bswap)
 		pr_pid = bswap_32(pr_pid);
-	return pr_pid;
+	*ret = pr_pid;
+	return NULL;
 }
 
 struct drgn_error *drgn_program_cache_prstatus_entry(struct drgn_program *prog,
 						     const char *data,
 						     size_t size)
 {
-	if (size < (drgn_program_is_64_bit(prog) ? 36 : 28)) {
-		return drgn_error_create(DRGN_ERROR_OTHER,
-					 "NT_PRSTATUS is truncated");
-	}
 	if (prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) {
 		struct string *entry =
 			drgn_prstatus_vector_append_entry(&prog->prstatus_vector);
@@ -766,9 +676,12 @@ struct drgn_error *drgn_program_cache_prstatus_entry(struct drgn_program *prog,
 		entry->len = size;
 	} else {
 		struct drgn_prstatus_map_entry entry = {
-			.key = get_prstatus_pid(prog, data, size),
 			.value = { data, size },
 		};
+		struct drgn_error *err = get_prstatus_pid(prog, data, size,
+							  &entry.key);
+		if (err)
+			return err;
 		if (drgn_prstatus_map_insert(&prog->prstatus_map, &entry,
 					     NULL) == -1)
 			return &drgn_enomem;
@@ -863,21 +776,19 @@ struct drgn_error *drgn_program_find_prstatus_by_cpu(struct drgn_program *prog,
 						     struct string *ret,
 						     uint32_t *tid_ret)
 {
-	struct drgn_error *err;
-
 	assert(prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL);
-	err = drgn_program_cache_prstatus(prog);
+	struct drgn_error *err = drgn_program_cache_prstatus(prog);
 	if (err)
 		return err;
 
 	if (cpu < prog->prstatus_vector.size) {
 		*ret = prog->prstatus_vector.data[cpu];
-		*tid_ret = get_prstatus_pid(prog, ret->str, ret->len);
+		return get_prstatus_pid(prog, ret->str, ret->len, tid_ret);
 	} else {
 		ret->str = NULL;
 		ret->len = 0;
+		return NULL;
 	}
-	return NULL;
 }
 
 struct drgn_error *drgn_program_find_prstatus_by_tid(struct drgn_program *prog,
@@ -1069,18 +980,16 @@ LIBDRGN_PUBLIC struct drgn_error *						\
 drgn_program_read_u##n(struct drgn_program *prog, uint64_t address,		\
 		       bool physical, uint##n##_t *ret)				\
 {										\
-	struct drgn_error *err;							\
+	bool bswap;								\
+	struct drgn_error *err = drgn_program_bswap(prog, &bswap);		\
+	if (err)								\
+		return err;							\
 	uint##n##_t tmp;							\
-										\
-	if (!prog->has_platform) {						\
-		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,		\
-					 "program byte order is not known");	\
-	}									\
 	err = drgn_memory_reader_read(&prog->reader, &tmp, address,		\
 				      sizeof(tmp), physical);			\
 	if (err)								\
 		return err;							\
-	if (drgn_program_bswap(prog))						\
+	if (bswap)								\
 		tmp = bswap_##n(tmp);						\
 	*ret = tmp;								\
 	return NULL;								\
@@ -1095,19 +1004,20 @@ LIBDRGN_PUBLIC struct drgn_error *
 drgn_program_read_word(struct drgn_program *prog, uint64_t address,
 		       bool physical, uint64_t *ret)
 {
-	struct drgn_error *err;
-
-	if (!prog->has_platform) {
-		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
-					 "program word size is not known");
-	}
-	if (drgn_program_is_64_bit(prog)) {
+	bool is_64_bit, bswap;
+	struct drgn_error *err = drgn_program_is_64_bit(prog, &is_64_bit);
+	if (err)
+		return err;
+	err = drgn_program_bswap(prog, &bswap);
+	if (err)
+		return err;
+	if (is_64_bit) {
 		uint64_t tmp;
 		err = drgn_memory_reader_read(&prog->reader, &tmp, address,
 					      sizeof(tmp), physical);
 		if (err)
 			return err;
-		if (drgn_program_bswap(prog))
+		if (bswap)
 			tmp = bswap_64(tmp);
 		*ret = tmp;
 	} else {
@@ -1116,19 +1026,11 @@ drgn_program_read_word(struct drgn_program *prog, uint64_t address,
 					      sizeof(tmp), physical);
 		if (err)
 			return err;
-		if (drgn_program_bswap(prog))
+		if (bswap)
 			tmp = bswap_32(tmp);
 		*ret = tmp;
 	}
 	return NULL;
-}
-
-LIBDRGN_PUBLIC struct drgn_error *
-drgn_program_find_type(struct drgn_program *prog, const char *name,
-		       const char *filename, struct drgn_qualified_type *ret)
-{
-	return drgn_type_index_find(&prog->tindex, name, filename,
-				    drgn_program_language(prog), ret);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
@@ -1137,7 +1039,7 @@ drgn_program_find_object(struct drgn_program *prog, const char *name,
 			 enum drgn_find_object_flags flags,
 			 struct drgn_object *ret)
 {
-	if (ret && ret->prog != prog) {
+	if (ret && drgn_object_program(ret) != prog) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "object is from wrong program");
 	}
@@ -1150,14 +1052,9 @@ bool drgn_program_find_symbol_by_address_internal(struct drgn_program *prog,
 						  Dwfl_Module *module,
 						  struct drgn_symbol *ret)
 {
-	const char *name;
-	GElf_Off offset;
-	GElf_Sym elf_sym;
-
 	if (!module) {
-		if (prog->_dicache) {
-			module = dwfl_addrmodule(prog->_dicache->dindex.dwfl,
-						 address);
+		if (prog->_dbinfo) {
+			module = dwfl_addrmodule(prog->_dbinfo->dwfl, address);
 			if (!module)
 				return false;
 		} else {
@@ -1165,8 +1062,10 @@ bool drgn_program_find_symbol_by_address_internal(struct drgn_program *prog,
 		}
 	}
 
-	name = dwfl_module_addrinfo(module, address, &offset, &elf_sym, NULL,
-				    NULL, NULL);
+	GElf_Off offset;
+	GElf_Sym elf_sym;
+	const char *name = dwfl_module_addrinfo(module, address, &offset,
+						&elf_sym, NULL, NULL, NULL);
 	if (!name)
 		return false;
 	ret->name = name;
@@ -1254,8 +1153,8 @@ drgn_program_find_symbol_by_name(struct drgn_program *prog,
 		.ret = ret,
 	};
 
-	if (prog->_dicache &&
-	    dwfl_getmodules(prog->_dicache->dindex.dwfl, find_symbol_by_name_cb,
+	if (prog->_dbinfo &&
+	    dwfl_getmodules(prog->_dbinfo->dwfl, find_symbol_by_name_cb,
 			    &arg, 0))
 		return arg.err;
 	return drgn_error_format(DRGN_ERROR_LOOKUP,
@@ -1288,8 +1187,8 @@ drgn_program_member_info(struct drgn_program *prog, struct drgn_type *type,
 	struct drgn_error *err;
 	struct drgn_member_value *member;
 
-	err = drgn_type_index_find_member(&prog->tindex, type, member_name,
-					  strlen(member_name), &member);
+	err = drgn_program_find_member(prog, type, member_name,
+				       strlen(member_name), &member);
 	if (err)
 		return err;
 

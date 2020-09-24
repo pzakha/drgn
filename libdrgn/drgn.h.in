@@ -10,11 +10,14 @@
 #ifndef DRGN_H
 #define DRGN_H
 
-#include <assert.h>
-#include <limits.h>
+// IWYU pragma: begin_exports
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+// IWYU pragma: end_exports
+
+#include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <sys/types.h>
 
@@ -210,6 +213,19 @@ struct drgn_error *drgn_error_format_fault(uint64_t address,
 					   const char *format, ...)
 	__attribute__((returns_nonnull,format(printf, 2, 3)));
 
+/*
+ * Create a copy of a @ref drgn_error.
+ *
+ * The source's error message and path are copied if necessary, so the source
+ * error can be destroyed without affecting the new error and vice versa.
+ *
+ * @param[in] src Error to copy.
+ * @return A new error with the same fields. If there is a failure to allocate
+ * memory, @ref drgn_enomem is returned instead.
+ */
+struct drgn_error *drgn_error_copy(struct drgn_error *src)
+	__attribute__((returns_nonnull));
+
 /**
  * Write a @ref drgn_error to a @c stdio stream.
  *
@@ -234,9 +250,6 @@ int drgn_error_fwrite(FILE *file, struct drgn_error *err);
 void drgn_error_destroy(struct drgn_error *err);
 
 /** @} */
-
-struct drgn_type;
-struct drgn_type_thunk;
 
 /**
  * @ingroup Types
@@ -425,6 +438,7 @@ struct drgn_type {
 		enum drgn_primitive_type primitive;
 		/* These are the qualifiers for the wrapped type, not this type. */
 		enum drgn_qualifiers qualifiers;
+		struct drgn_program *program;
 		const struct drgn_language *language;
 		/*
 		 * This mess of unions is used to make this as compact as possible. Use
@@ -491,6 +505,12 @@ drgn_type_primitive(struct drgn_type *type)
 static inline bool drgn_type_is_complete(struct drgn_type *type)
 {
 	return type->_private.is_complete;
+}
+
+static inline struct drgn_program *
+drgn_type_program(struct drgn_type *type)
+{
+	return type->_private.program;
 }
 
 /** Get the language of a type. */
@@ -1628,8 +1648,6 @@ static inline bool drgn_value_is_inline(uint64_t bit_size, uint64_t bit_offset)
  * provided functions.
  */
 struct drgn_object {
-	/** Program that this object belongs to. */
-	struct drgn_program *prog;
 	/** Type of this object. */
 	struct drgn_type *type;
 	/**
@@ -1727,6 +1745,12 @@ void drgn_object_init(struct drgn_object *obj, struct drgn_program *prog);
  */
 void drgn_object_deinit(struct drgn_object *obj);
 
+/** Get the program that a @ref drgn_object is from. */
+static inline struct drgn_program *
+drgn_object_program(const struct drgn_object *obj)
+{
+	return drgn_type_program(obj->type);
+}
 
 /** Get the language of a @ref drgn_object from its type. */
 static inline const struct drgn_language *

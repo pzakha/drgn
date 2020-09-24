@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include <dirent.h>
+#include <elf.h>
+#include <gelf.h>
+#include <libelf.h>
+#include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -10,14 +14,20 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 
-#include "internal.h"
-#include "dwarf_index.h"
+#include "debug_info.h"
+#include "drgn.h"
+#include "error.h"
+#include "hash_table.h"
 #include "helpers.h"
+#include "language.h"
 #include "linux_kernel.h"
+#include "memory_reader.h"
+#include "mread.h"
+#include "platform.h"
 #include "program.h"
-#include "read.h"
+#include "type.h"
+#include "util.h"
 
 struct drgn_error *read_memory_via_pgtable(void *buf, uint64_t address,
 					   size_t count, uint64_t offset,
@@ -286,18 +296,18 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 				}
 			}
 
-			err = drgn_type_index_find_primitive(&prog->tindex,
-							     DRGN_C_TYPE_UNSIGNED_LONG,
-							     &qualified_type.type);
+			err = drgn_program_find_primitive_type(prog,
+							       DRGN_C_TYPE_UNSIGNED_LONG,
+							       &qualified_type.type);
 			if (err)
 				return err;
 			return drgn_object_set_unsigned(ret, qualified_type,
 							prog->page_offset, 0);
 		} else if (name_len == strlen("PAGE_SHIFT") &&
 			   memcmp(name, "PAGE_SHIFT", name_len) == 0) {
-			err = drgn_type_index_find_primitive(&prog->tindex,
-							     DRGN_C_TYPE_INT,
-							     &qualified_type.type);
+			err = drgn_program_find_primitive_type(prog,
+							       DRGN_C_TYPE_INT,
+							       &qualified_type.type);
 			if (err)
 				return err;
 			return drgn_object_set_signed(ret, qualified_type,
@@ -305,9 +315,9 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 						      0);
 		} else if (name_len == strlen("PAGE_SIZE") &&
 			   memcmp(name, "PAGE_SIZE", name_len) == 0) {
-			err = drgn_type_index_find_primitive(&prog->tindex,
-							     DRGN_C_TYPE_UNSIGNED_LONG,
-							     &qualified_type.type);
+			err = drgn_program_find_primitive_type(prog,
+							       DRGN_C_TYPE_UNSIGNED_LONG,
+							       &qualified_type.type);
 			if (err)
 				return err;
 			return drgn_object_set_unsigned(ret, qualified_type,
@@ -315,9 +325,9 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 							0);
 		} else if (name_len == strlen("PAGE_MASK") &&
 			   memcmp(name, "PAGE_MASK", name_len) == 0) {
-			err = drgn_type_index_find_primitive(&prog->tindex,
-							     DRGN_C_TYPE_UNSIGNED_LONG,
-							     &qualified_type.type);
+			err = drgn_program_find_primitive_type(prog,
+							       DRGN_C_TYPE_UNSIGNED_LONG,
+							       &qualified_type.type);
 			if (err)
 				return err;
 			return drgn_object_set_unsigned(ret, qualified_type,
@@ -330,9 +340,9 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 			err = linux_kernel_get_thread_size(prog, &thread_size);
 			if (err)
 				return err;
-			err = drgn_type_index_find_primitive(&prog->tindex,
-							     DRGN_C_TYPE_UNSIGNED_LONG,
-							     &qualified_type.type);
+			err = drgn_program_find_primitive_type(prog,
+							       DRGN_C_TYPE_UNSIGNED_LONG,
+							       &qualified_type.type);
 			if (err)
 				return err;
 			return drgn_object_set_unsigned(ret, qualified_type,
@@ -341,16 +351,16 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 			   memcmp(name, "UTS_RELEASE", name_len) == 0) {
 			size_t len;
 
-			err = drgn_type_index_find_primitive(&prog->tindex,
-							     DRGN_C_TYPE_CHAR,
-							     &qualified_type.type);
+			err = drgn_program_find_primitive_type(prog,
+							       DRGN_C_TYPE_CHAR,
+							       &qualified_type.type);
 			if (err)
 				return err;
 			qualified_type.qualifiers = DRGN_QUALIFIER_CONST;
 			len = strlen(prog->vmcoreinfo.osrelease);
-			err = drgn_type_index_array_type(&prog->tindex, len + 1,
-							 qualified_type, NULL,
-							 &qualified_type.type);
+			err = drgn_array_type_create(prog, qualified_type,
+						     len + 1, &drgn_language_c,
+						     &qualified_type.type);
 			if (err)
 				return err;
 			qualified_type.qualifiers = 0;
@@ -753,12 +763,10 @@ struct kmod_index {
 static struct drgn_error *kmod_index_validate(struct kmod_index *index,
 					      const char *path)
 {
-	const char *ptr;
+	const char *ptr = index->ptr;
 	uint32_t magic, version;
-
-	ptr = index->ptr;
-	if (!read_be32(&ptr, index->end, &magic) ||
-	    !read_be32(&ptr, index->end, &version)) {
+	if (!mread_be32(&ptr, index->end, &magic) ||
+	    !mread_be32(&ptr, index->end, &version)) {
 		return drgn_error_format(DRGN_ERROR_OTHER, "%s is too short",
 					 path);
 	}
@@ -824,20 +832,21 @@ static const char *kmod_index_find(struct kmod_index *index, const char *key)
 	static const uint32_t INDEX_NODE_CHILDS = UINT32_C(0x20000000);
 	static const uint32_t INDEX_NODE_VALUES = UINT32_C(0x40000000);
 	static const uint32_t INDEX_NODE_PREFIX = UINT32_C(0x80000000);
+
+	/* kmod_index_validate() already checked that this is within bounds. */
 	const char *ptr = index->ptr + 8;
 	uint32_t offset;
-
 	for (;;) {
-		if (!read_be32(&ptr, index->end, &offset))
+		if (!mread_be32(&ptr, index->end, &offset) ||
+		    !(ptr = mread_begin(index->ptr, index->end,
+					offset & INDEX_NODE_MASK)))
 			return NULL;
-		ptr = index->ptr + (offset & INDEX_NODE_MASK);
 
 		if (offset & INDEX_NODE_PREFIX) {
 			const char *prefix;
 			size_t prefix_len;
-
-			if (!read_string(&ptr, index->end, &prefix,
-					 &prefix_len))
+			if (!mread_string(&ptr, index->end, &prefix,
+					  &prefix_len))
 				return NULL;
 			if (strncmp(key, prefix, prefix_len) != 0)
 				return NULL;
@@ -846,20 +855,21 @@ static const char *kmod_index_find(struct kmod_index *index, const char *key)
 
 		if (offset & INDEX_NODE_CHILDS) {
 			uint8_t first, last;
-
-			if (!read_u8(&ptr, index->end, &first) ||
-			    !read_u8(&ptr, index->end, &last))
+			if (!mread_u8(&ptr, index->end, &first) ||
+			    !mread_u8(&ptr, index->end, &last))
 				return NULL;
 			if (*key) {
 				uint8_t cur = *key;
-
-				if (cur < first || cur > last)
+				if (cur < first || cur > last ||
+				    !mread_skip(&ptr, index->end,
+						4 * (cur - first)))
 					return NULL;
-				ptr += 4 * (cur - first);
 				key++;
 				continue;
 			} else {
-				ptr += 4 * (last - first + 1);
+				if (!mread_skip(&ptr, index->end,
+						4 * (last - first + 1)))
+					return NULL;
 				break;
 			}
 		} else if (*key) {
@@ -904,27 +914,24 @@ static void depmod_index_deinit(struct depmod_index *depmod)
 static bool depmod_index_find(struct depmod_index *depmod, const char *name,
 			      const char **path_ret, size_t *len_ret)
 {
-	const char *ptr;
-	uint32_t value_count;
-	const char *deps;
-	size_t deps_len;
-	char *colon;
-
-	ptr = kmod_index_find(&depmod->modules_dep, name);
+	const char *ptr = kmod_index_find(&depmod->modules_dep, name);
 	if (!ptr)
 		return false;
 
-	if (!read_be32(&ptr, depmod->modules_dep.end, &value_count) ||
+	uint32_t value_count;
+	if (!mread_be32(&ptr, depmod->modules_dep.end, &value_count) ||
 	    !value_count)
 		return false;
 
 	/* Skip over priority. */
-	ptr += 4;
-	if (!read_string(&ptr, depmod->modules_dep.end, &deps,
+	const char *deps;
+	size_t deps_len;
+	if (!mread_skip(&ptr, depmod->modules_dep.end, 4) ||
+	    !mread_string(&ptr, depmod->modules_dep.end, &deps,
 			 &deps_len))
 		return false;
 
-	colon = strchr(deps, ':');
+	const char *colon = strchr(deps, ':');
 	if (!colon)
 		return false;
 
@@ -1158,42 +1165,37 @@ DEFINE_HASH_TABLE(kernel_module_table, struct kernel_module_file *,
 		  kernel_module_table_key, c_string_hash, c_string_eq)
 
 static struct drgn_error *
-report_loaded_kernel_module(struct drgn_program *prog,
-			    struct drgn_dwarf_index *dindex,
+report_loaded_kernel_module(struct drgn_debug_info_load_state *load,
 			    struct kernel_module_iterator *kmod_it,
 			    struct kernel_module_table *kmod_table)
 {
 	struct drgn_error *err;
-	const char *name = kmod_it->name;
-	struct hash_pair hp;
-	struct kernel_module_table_iterator it;
-	struct kernel_module_file *kmod;
 
-	hp = kernel_module_table_hash(&name);
-	it = kernel_module_table_search_hashed(kmod_table, &name, hp);
+	const char *name = kmod_it->name;
+	struct hash_pair hp = kernel_module_table_hash(&name);
+	struct kernel_module_table_iterator it =
+		kernel_module_table_search_hashed(kmod_table, &name, hp);
 	if (!it.entry)
 		return &drgn_not_found;
 
-	kmod = *it.entry;
+	struct kernel_module_file *kmod = *it.entry;
 	kernel_module_table_delete_iterator_hashed(kmod_table, it, hp);
 	do {
 		uint64_t start, end;
-
 		err = cache_kernel_module_sections(kmod_it, kmod->elf, &start,
 						   &end);
 		if (err) {
-			err = drgn_dwarf_index_report_error(dindex,
-							    kmod->path,
-							    "could not get section addresses",
-							    err);
+			err = drgn_debug_info_report_error(load, kmod->path,
+							   "could not get section addresses",
+							   err);
 			if (err)
 				return err;
 			continue;
 		}
 
-		err = drgn_dwarf_index_report_elf(dindex, kmod->path, kmod->fd,
-						  kmod->elf, start, end,
-						  kmod->name, NULL);
+		err = drgn_debug_info_report_elf(load, kmod->path, kmod->fd,
+						 kmod->elf, start, end,
+						 kmod->name, NULL);
 		kmod->elf = NULL;
 		kmod->fd = -1;
 		if (err)
@@ -1204,8 +1206,7 @@ report_loaded_kernel_module(struct drgn_program *prog,
 }
 
 static struct drgn_error *
-report_default_kernel_module(struct drgn_program *prog,
-			     struct drgn_dwarf_index *dindex,
+report_default_kernel_module(struct drgn_debug_info_load_state *load,
 			     struct kernel_module_iterator *kmod_it,
 			     struct depmod_index *depmod)
 {
@@ -1216,71 +1217,71 @@ report_default_kernel_module(struct drgn_program *prog,
 		NULL,
 	};
 	struct drgn_error *err;
+
 	const char *depmod_path;
 	size_t depmod_path_len;
-	size_t extension_len;
-	char *path;
-	int fd;
-	Elf *elf;
-	uint64_t start, end;
-
 	if (!depmod_index_find(depmod, kmod_it->name, &depmod_path,
 			       &depmod_path_len)) {
-		return drgn_dwarf_index_report_error(dindex, kmod_it->name,
-						     "could not find module in depmod",
-						     NULL);
+		return drgn_debug_info_report_error(load, kmod_it->name,
+						    "could not find module in depmod",
+						    NULL);
 	}
 
+	size_t extension_len;
 	if (depmod_path_len >= 3 &&
 	    (memcmp(depmod_path + depmod_path_len - 3, ".gz", 3) == 0 ||
 	     memcmp(depmod_path + depmod_path_len - 3, ".xz", 3) == 0))
 		extension_len = 3;
 	else
 		extension_len = 0;
+	char *path;
+	int fd;
+	Elf *elf;
 	err = find_elf_file(&path, &fd, &elf, module_paths,
-			    prog->vmcoreinfo.osrelease,
+			    load->dbinfo->prog->vmcoreinfo.osrelease,
 			    depmod_path_len - extension_len, depmod_path,
 			    extension_len,
 			    depmod_path + depmod_path_len - extension_len);
 	if (err)
-		return drgn_dwarf_index_report_error(dindex, NULL, NULL, err);
+		return drgn_debug_info_report_error(load, NULL, NULL, err);
 	if (!elf) {
-		return drgn_dwarf_index_report_error(dindex, kmod_it->name,
-						     "could not find .ko",
-						     NULL);
+		return drgn_debug_info_report_error(load, kmod_it->name,
+						    "could not find .ko",
+						    NULL);
 	}
 
+	uint64_t start, end;
 	err = cache_kernel_module_sections(kmod_it, elf, &start, &end);
 	if (err) {
 		elf_end(elf);
 		close(fd);
 		free(path);
-		return drgn_dwarf_index_report_error(dindex, path,
-						     "could not get section addresses",
-						     err);
+		return drgn_debug_info_report_error(load, path,
+						    "could not get section addresses",
+						    err);
 	}
 
-	err = drgn_dwarf_index_report_elf(dindex, path, fd, elf, start, end,
-					  kmod_it->name, NULL);
+	err = drgn_debug_info_report_elf(load, path, fd, elf, start, end,
+					 kmod_it->name, NULL);
 	free(path);
 	return err;
 }
 
 static struct drgn_error *
-report_loaded_kernel_modules(struct drgn_program *prog,
-			     struct drgn_dwarf_index *dindex,
+report_loaded_kernel_modules(struct drgn_debug_info_load_state *load,
 			     struct kernel_module_table *kmod_table,
 			     struct depmod_index *depmod)
 {
+	struct drgn_program *prog = load->dbinfo->prog;
 	struct drgn_error *err;
-	struct kernel_module_iterator kmod_it;
 
+	struct kernel_module_iterator kmod_it;
 	err = kernel_module_iterator_init(&kmod_it, prog);
 	if (err) {
 kernel_module_iterator_error:
-		return drgn_dwarf_index_report_error(dindex, "kernel modules",
-						     "could not find loaded kernel modules",
-						     err);
+		return drgn_debug_info_report_error(load, "kernel modules",
+						    "could not find loaded kernel modules",
+						    err);
 	}
 	for (;;) {
 		err = kernel_module_iterator_next(&kmod_it);
@@ -1294,8 +1295,8 @@ kernel_module_iterator_error:
 
 		/* Look for an explicitly-reported file first. */
 		if (kmod_table) {
-			err = report_loaded_kernel_module(prog, dindex,
-							  &kmod_it, kmod_table);
+			err = report_loaded_kernel_module(load, &kmod_it,
+							  kmod_table);
 			if (!err)
 				continue;
 			else if (err != &drgn_not_found)
@@ -1308,24 +1309,24 @@ kernel_module_iterator_error:
 		 * already indexed that module.
 		 */
 		if (depmod &&
-		    !drgn_dwarf_index_is_indexed(dindex, kmod_it.name)) {
+		    !drgn_debug_info_is_indexed(load->dbinfo, kmod_it.name)) {
 			if (!depmod->modules_dep.ptr) {
 				err = depmod_index_init(depmod,
 							prog->vmcoreinfo.osrelease);
 				if (err) {
 					depmod->modules_dep.ptr = NULL;
-					err = drgn_dwarf_index_report_error(dindex,
-									    "kernel modules",
-									    "could not read depmod",
-									    err);
+					err = drgn_debug_info_report_error(load,
+									   "kernel modules",
+									   "could not read depmod",
+									   err);
 					if (err)
 						break;
 					depmod = NULL;
 					continue;
 				}
 			}
-			err = report_default_kernel_module(prog, dindex,
-							   &kmod_it, depmod);
+			err = report_default_kernel_module(load, &kmod_it,
+							   depmod);
 			if (err)
 				break;
 		}
@@ -1335,15 +1336,14 @@ kernel_module_iterator_error:
 }
 
 static struct drgn_error *
-report_kernel_modules(struct drgn_program *prog,
-		      struct drgn_dwarf_index *dindex,
+report_kernel_modules(struct drgn_debug_info_load_state *load,
 		      struct kernel_module_file *kmods, size_t num_kmods,
-		      bool report_default, bool need_module_definition,
-		      bool vmlinux_is_pending)
+		      bool need_module_definition, bool vmlinux_is_pending)
 {
+	struct drgn_program *prog = load->dbinfo->prog;
 	struct drgn_error *err;
 
-	if (!num_kmods && !report_default)
+	if (!num_kmods && !load->load_default)
 		return NULL;
 
 	/*
@@ -1355,7 +1355,7 @@ report_kernel_modules(struct drgn_program *prog,
 	 */
 	if (vmlinux_is_pending &&
 	    (!(prog->flags & DRGN_PROGRAM_IS_LIVE) || need_module_definition)) {
-		err = drgn_dwarf_index_flush(dindex, false);
+		err = drgn_debug_info_report_flush(load);
 		if (err)
 			return err;
 	}
@@ -1371,10 +1371,10 @@ report_kernel_modules(struct drgn_program *prog,
 						       "name", &name_member);
 		}
 		if (err) {
-			return drgn_dwarf_index_report_error(dindex,
-							     "kernel modules",
-							     "could not get kernel module names",
-							     err);
+			return drgn_debug_info_report_error(load,
+							    "kernel modules",
+							    "could not get kernel module names",
+							    err);
 		}
 		module_name_offset = name_member.bit_offset / 8;
 	}
@@ -1390,18 +1390,18 @@ report_kernel_modules(struct drgn_program *prog,
 								      module_name_offset,
 								      &kmod->name);
 			if (err) {
-				err = drgn_dwarf_index_report_error(dindex,
-								    kmod->path,
-								    NULL, err);
+				err = drgn_debug_info_report_error(load,
+								   kmod->path,
+								   NULL, err);
 				if (err)
 					goto out;
 				continue;
 			}
 			if (!kmod->name) {
-				err = drgn_dwarf_index_report_error(dindex,
-								    kmod->path,
-								    "could not find kernel module name",
-								    NULL);
+				err = drgn_debug_info_report_error(load,
+								   kmod->path,
+								   "could not find kernel module name",
+								   NULL);
 				if (err)
 					goto out;
 				continue;
@@ -1425,9 +1425,9 @@ report_kernel_modules(struct drgn_program *prog,
 		}
 	}
 
-	err = report_loaded_kernel_modules(prog, dindex,
+	err = report_loaded_kernel_modules(load,
 					   num_kmods ? &kmod_table : NULL,
-					   report_default ? &depmod : NULL);
+					   load->load_default ? &depmod : NULL);
 	if (err)
 		goto out;
 
@@ -1436,10 +1436,9 @@ report_kernel_modules(struct drgn_program *prog,
 		struct kernel_module_file *kmod = *it.entry;
 		it = kernel_module_table_delete_iterator(&kmod_table, it);
 		do {
-			err = drgn_dwarf_index_report_elf(dindex, kmod->path,
-							  kmod->fd, kmod->elf,
-							  0, 0, kmod->name,
-							  NULL);
+			err = drgn_debug_info_report_elf(load, kmod->path,
+							 kmod->fd, kmod->elf, 0,
+							 0, kmod->name, NULL);
 			kmod->elf = NULL;
 			kmod->fd = -1;
 			if (err)
@@ -1455,9 +1454,9 @@ out:
 	return err;
 }
 
-static struct drgn_error *report_vmlinux(struct drgn_program *prog,
-					 struct drgn_dwarf_index *dindex,
-					 bool *vmlinux_is_pending)
+static struct drgn_error *
+report_vmlinux(struct drgn_debug_info_load_state *load,
+	       bool *vmlinux_is_pending)
 {
 	static const char * const vmlinux_paths[] = {
 		/*
@@ -1471,54 +1470,49 @@ static struct drgn_error *report_vmlinux(struct drgn_program *prog,
 		"/lib/modules/%s/vmlinux",
 		NULL,
 	};
+	struct drgn_program *prog = load->dbinfo->prog;
 	struct drgn_error *err;
+
 	char *path;
 	int fd;
 	Elf *elf;
-	uint64_t start, end;
-
 	err = find_elf_file(&path, &fd, &elf, vmlinux_paths,
 			    prog->vmcoreinfo.osrelease);
 	if (err)
-		return drgn_dwarf_index_report_error(dindex, NULL, NULL, err);
+		return drgn_debug_info_report_error(load, NULL, NULL, err);
 	if (!elf) {
 		err = drgn_error_format(DRGN_ERROR_OTHER,
 					"could not find vmlinux for %s",
 					prog->vmcoreinfo.osrelease);
-		return drgn_dwarf_index_report_error(dindex, "kernel", NULL,
-						     err);
+		return drgn_debug_info_report_error(load, "kernel", NULL, err);
 	}
 
+	uint64_t start, end;
 	err = elf_address_range(elf, prog->vmcoreinfo.kaslr_offset, &start,
 				&end);
 	if (err) {
-		err = drgn_dwarf_index_report_error(dindex, path, NULL, err);
+		err = drgn_debug_info_report_error(load, path, NULL, err);
 		elf_end(elf);
 		close(fd);
 		free(path);
 		return err;
 	}
 
-	err = drgn_dwarf_index_report_elf(dindex, path, fd, elf, start, end,
-					  "kernel", vmlinux_is_pending);
+	err = drgn_debug_info_report_elf(load, path, fd, elf, start, end,
+					 "kernel", vmlinux_is_pending);
 	free(path);
 	return err;
 }
 
 struct drgn_error *
-linux_kernel_report_debug_info(struct drgn_program *prog,
-			       struct drgn_dwarf_index *dindex,
-			       const char **paths, size_t n,
-			       bool report_default, bool report_main)
+linux_kernel_report_debug_info(struct drgn_debug_info_load_state *load)
 {
+	struct drgn_program *prog = load->dbinfo->prog;
 	struct drgn_error *err;
-	struct kernel_module_file *kmods;
-	size_t i, num_kmods = 0;
-	bool need_module_definition = false;
-	bool vmlinux_is_pending = false;
 
-	if (n) {
-		kmods = malloc_array(n, sizeof(*kmods));
+	struct kernel_module_file *kmods;
+	if (load->num_paths) {
+		kmods = malloc_array(load->num_paths, sizeof(*kmods));
 		if (!kmods)
 			return &drgn_enomem;
 	} else {
@@ -1530,27 +1524,29 @@ linux_kernel_report_debug_info(struct drgn_program *prog,
 	 * modules. So, this sets aside kernel modules and reports everything
 	 * else.
 	 */
-	for (i = 0; i < n; i++) {
-		const char *path = paths[i];
+	size_t num_kmods = 0;
+	bool need_module_definition = false;
+	bool vmlinux_is_pending = false;
+	for (size_t i = 0; i < load->num_paths; i++) {
+		const char *path = load->paths[i];
 		int fd;
 		Elf *elf;
-		Elf_Scn *this_module_scn, *modinfo_scn;
-		bool is_vmlinux;
-
 		err = open_elf_file(path, &fd, &elf);
 		if (err) {
-			err = drgn_dwarf_index_report_error(dindex, path, NULL,
-							    err);
+			err = drgn_debug_info_report_error(load, path, NULL,
+							   err);
 			if (err)
 				goto out;
 			continue;
 		}
 
+		Elf_Scn *this_module_scn, *modinfo_scn;
+		bool is_vmlinux;
 		err = identify_kernel_elf(elf, &this_module_scn, &modinfo_scn,
 					  &is_vmlinux);
 		if (err) {
-			err = drgn_dwarf_index_report_error(dindex, path, NULL,
-							    err);
+			err = drgn_debug_info_report_error(load, path, NULL,
+							   err);
 			elf_end(elf);
 			close(fd);
 			if (err)
@@ -1559,16 +1555,14 @@ linux_kernel_report_debug_info(struct drgn_program *prog,
 		}
 		if (this_module_scn || modinfo_scn) {
 			struct kernel_module_file *kmod = &kmods[num_kmods++];
-
 			kmod->path = path;
 			kmod->fd = fd;
 			kmod->elf = elf;
 			err = get_kernel_module_name_from_modinfo(modinfo_scn,
 								  &kmod->name);
 			if (err) {
-				err = drgn_dwarf_index_report_error(dindex,
-								    path, NULL,
-								    err);
+				err = drgn_debug_info_report_error(load, path,
+								   NULL, err);
 				if (err)
 					goto out;
 				continue;
@@ -1579,49 +1573,46 @@ linux_kernel_report_debug_info(struct drgn_program *prog,
 			}
 		} else if (is_vmlinux) {
 			uint64_t start, end;
-			bool is_new;
-
 			err = elf_address_range(elf,
 						prog->vmcoreinfo.kaslr_offset,
 						&start, &end);
 			if (err) {
 				elf_end(elf);
 				close(fd);
-				err = drgn_dwarf_index_report_error(dindex,
-								    path, NULL,
-								    err);
+				err = drgn_debug_info_report_error(load, path,
+								   NULL, err);
 				if (err)
 					goto out;
 				continue;
 			}
 
-			err = drgn_dwarf_index_report_elf(dindex, path, fd, elf,
-							  start, end, "kernel",
-							  &is_new);
+			bool is_new;
+			err = drgn_debug_info_report_elf(load, path, fd, elf,
+							 start, end, "kernel",
+							 &is_new);
 			if (err)
 				goto out;
 			if (is_new)
 				vmlinux_is_pending = true;
 		} else {
-			err = drgn_dwarf_index_report_elf(dindex, path, fd, elf,
-							  0, 0, NULL, NULL);
+			err = drgn_debug_info_report_elf(load, path, fd, elf, 0,
+							 0, NULL, NULL);
 			if (err)
 				goto out;
 		}
 	}
 
-	if (report_main && !vmlinux_is_pending &&
-	    !drgn_dwarf_index_is_indexed(dindex, "kernel")) {
-		err = report_vmlinux(prog, dindex, &vmlinux_is_pending);
+	if (load->load_main && !vmlinux_is_pending &&
+	    !drgn_debug_info_is_indexed(load->dbinfo, "kernel")) {
+		err = report_vmlinux(load, &vmlinux_is_pending);
 		if (err)
 			goto out;
 	}
 
-	err = report_kernel_modules(prog, dindex, kmods, num_kmods,
-				    report_default, need_module_definition,
-				    vmlinux_is_pending);
+	err = report_kernel_modules(load, kmods, num_kmods,
+				    need_module_definition, vmlinux_is_pending);
 out:
-	for (i = 0; i < num_kmods; i++) {
+	for (size_t i = 0; i < num_kmods; i++) {
 		elf_end(kmods[i].elf);
 		if (kmods[i].fd != -1)
 			close(kmods[i].fd);

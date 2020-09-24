@@ -1,24 +1,25 @@
 // Copyright (c) Facebook, Inc. and its affiliates.
 // SPDX-License-Identifier: GPL-3.0+
 
+#include <assert.h>
 #include <inttypes.h>
-#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "internal.h"
+#include "drgn.h"
+#include "error.h"
 #include "language.h"
 #include "memory_reader.h"
 #include "object.h"
 #include "program.h"
 #include "serialize.h"
 #include "type.h"
-#include "type_index.h"
+#include "util.h"
 
-void drgn_object_init(struct drgn_object *obj, struct drgn_program *prog)
+LIBDRGN_PUBLIC void drgn_object_init(struct drgn_object *obj,
+				     struct drgn_program *prog)
 {
-	obj->prog = prog;
-	obj->type = drgn_void_type(drgn_program_language(prog));
+	obj->type = drgn_void_type(prog, NULL);
 	obj->bit_size = 0;
 	obj->qualifiers = 0;
 	obj->kind = DRGN_OBJECT_NONE;
@@ -284,12 +285,7 @@ drgn_byte_order_to_little_endian(struct drgn_program *prog,
 		*ret = true;
 		return NULL;
 	case DRGN_PROGRAM_ENDIAN:
-		if (!prog->has_platform) {
-			return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
-						 "program byte order is not known");
-		}
-		*ret = drgn_program_is_little_endian(prog);
-		return NULL;
+		return drgn_program_is_little_endian(prog, ret);
 	default:
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "invalid byte order");
@@ -361,8 +357,8 @@ drgn_object_set_buffer(struct drgn_object *res,
 	enum drgn_object_kind kind;
 	uint64_t bit_size;
 
-	err = drgn_byte_order_to_little_endian(res->prog, byte_order,
-					       &little_endian);
+	err = drgn_byte_order_to_little_endian(drgn_object_program(res),
+					       byte_order, &little_endian);
 	if (err)
 		return err;
 
@@ -381,22 +377,18 @@ drgn_object_set_reference_internal(struct drgn_object *res,
 				   uint64_t bit_size, uint64_t address,
 				   uint64_t bit_offset, bool little_endian)
 {
-	struct drgn_error *err;
-
-	if (!res->prog->has_platform) {
-		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
-					 "program word size is not known");
-	}
+	bool is_64_bit;
+	struct drgn_error *err =
+		drgn_program_is_64_bit(drgn_object_program(res), &is_64_bit);
+	if (err)
+		return err;
 
 	err = sanity_check_object(kind, type->bit_field_size, bit_size);
 	if (err)
 		return err;
 
 	address += bit_offset / 8;
-	if (drgn_program_is_64_bit(res->prog))
-		address &= UINT64_MAX;
-	else
-		address &= UINT32_MAX;
+	address &= is_64_bit ? UINT64_MAX : UINT32_MAX;
 	bit_offset %= 8;
 	if (bit_size > UINT64_MAX - bit_offset) {
 		return drgn_error_format(DRGN_ERROR_OVERFLOW,
@@ -423,8 +415,8 @@ drgn_object_set_reference(struct drgn_object *res,
 	enum drgn_object_kind kind;
 	uint64_t bit_size;
 
-	err = drgn_byte_order_to_little_endian(res->prog, byte_order,
-					       &little_endian);
+	err = drgn_byte_order_to_little_endian(drgn_object_program(res),
+					       byte_order, &little_endian);
 	if (err)
 		return err;
 
@@ -443,7 +435,7 @@ drgn_object_copy(struct drgn_object *res, const struct drgn_object *obj)
 	if (res == obj)
 		return NULL;
 
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
@@ -537,7 +529,7 @@ drgn_object_slice(struct drgn_object *res, const struct drgn_object *obj,
 	enum drgn_object_kind kind;
 	uint64_t bit_size;
 
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
@@ -600,8 +592,8 @@ drgn_object_read_reference(const struct drgn_object *obj,
 			if (!buf)
 				return &drgn_enomem;
 		}
-		err = drgn_memory_reader_read(&obj->prog->reader, buf,
-					      obj->reference.address, size,
+		err = drgn_memory_reader_read(&drgn_object_program(obj)->reader,
+					      buf, obj->reference.address, size,
 					      false);
 		if (err) {
 			if (buf != value->ibuf)
@@ -617,8 +609,8 @@ drgn_object_read_reference(const struct drgn_object *obj,
 		char buf[9];
 
 		assert(size <= sizeof(buf));
-		err = drgn_memory_reader_read(&obj->prog->reader, buf,
-					      obj->reference.address, size,
+		err = drgn_memory_reader_read(&drgn_object_program(obj)->reader,
+					      buf, obj->reference.address, size,
 					      false);
 		if (err)
 			return err;
@@ -637,7 +629,7 @@ drgn_object_read(struct drgn_object *res, const struct drgn_object *obj)
 	if (obj->is_reference) {
 		union drgn_value value;
 
-		if (res->prog != obj->prog) {
+		if (drgn_object_program(res) != drgn_object_program(obj)) {
 			return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 						 "objects are from different programs");
 		}
@@ -827,8 +819,8 @@ drgn_object_read_c_string(const struct drgn_object *obj, char **ret)
 				       obj->type);
 	}
 
-	return drgn_program_read_c_string(obj->prog, address, false, max_size,
-					  ret);
+	return drgn_program_read_c_string(drgn_object_program(obj), address,
+					  false, max_size, ret);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
@@ -941,7 +933,7 @@ drgn_compound_object_is_zero(const struct drgn_object *obj,
 	struct drgn_type_member *members;
 	size_t num_members, i;
 
-	drgn_object_init(&member, obj->prog);
+	drgn_object_init(&member, drgn_object_program(obj));
 	members = drgn_type_members(underlying_type);
 	num_members = drgn_type_num_members(underlying_type);
 	for (i = 0; i < num_members; i++) {
@@ -982,7 +974,7 @@ drgn_array_object_is_zero(const struct drgn_object *obj,
 	if (err)
 		return err;
 
-	drgn_object_init(&element, obj->prog);
+	drgn_object_init(&element, drgn_object_program(obj));
 	length = drgn_type_length(underlying_type);
 	for (i = 0; i < length; i++) {
 		err = drgn_object_slice(&element, obj, element_type,
@@ -1075,7 +1067,7 @@ drgn_object_cast(struct drgn_object *res,
 {
 	const struct drgn_language *lang = drgn_type_language(qualified_type.type);
 
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
@@ -1094,13 +1086,13 @@ drgn_object_reinterpret(struct drgn_object *res,
 	enum drgn_object_kind kind;
 	uint64_t bit_size;
 
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
 
-	err = drgn_byte_order_to_little_endian(res->prog, byte_order,
-					       &little_endian);
+	err = drgn_byte_order_to_little_endian(drgn_object_program(res),
+					       byte_order, &little_endian);
 	if (err)
 		return err;
 
@@ -1133,24 +1125,24 @@ drgn_object_reinterpret(struct drgn_object *res,
 LIBDRGN_PUBLIC struct drgn_error *
 drgn_object_integer_literal(struct drgn_object *res, uint64_t uvalue)
 {
-	const struct drgn_language *lang = drgn_program_language(res->prog);
-
+	const struct drgn_language *lang =
+		drgn_program_language(drgn_object_program(res));
 	return lang->integer_literal(res, uvalue);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
 drgn_object_bool_literal(struct drgn_object *res, bool bvalue)
 {
-	const struct drgn_language *lang = drgn_program_language(res->prog);
-
+	const struct drgn_language *lang =
+		drgn_program_language(drgn_object_program(res));
 	return lang->bool_literal(res, bvalue);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
 drgn_object_float_literal(struct drgn_object *res, double fvalue)
 {
-	const struct drgn_language *lang = drgn_program_language(res->prog);
-
+	const struct drgn_language *lang =
+		drgn_program_language(drgn_object_program(res));
 	return lang->float_literal(res, fvalue);
 }
 
@@ -1167,8 +1159,7 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_object_cmp(const struct drgn_object *lhs,
 						  int *ret)
 {
 	const struct drgn_language *lang = drgn_object_language(lhs);
-
-	if (lhs->prog != rhs->prog) {
+	if (drgn_object_program(lhs) != drgn_object_program(rhs)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
@@ -1234,7 +1225,8 @@ drgn_object_##op_name(struct drgn_object *res, const struct drgn_object *lhs,	\
 {										\
 	const struct drgn_language *lang = drgn_object_language(lhs);		\
 										\
-	if (lhs->prog != res->prog || rhs->prog != res->prog) {			\
+	if (drgn_object_program(lhs) != drgn_object_program(res) ||		\
+	    drgn_object_program(rhs) != drgn_object_program(res)) {		\
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,		\
 					 "objects are from different programs");\
 	}									\
@@ -1263,7 +1255,7 @@ drgn_object_##op_name(struct drgn_object *res, const struct drgn_object *obj)	\
 {										\
 	const struct drgn_language *lang = drgn_object_language(obj);		\
 										\
-	if (res->prog != obj->prog) {						\
+	if (drgn_object_program(res) != drgn_object_program(obj)) {		\
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,		\
 					 "objects are from different programs");\
 	}									\
@@ -1282,10 +1274,7 @@ UNARY_OP(not)
 LIBDRGN_PUBLIC struct drgn_error *
 drgn_object_address_of(struct drgn_object *res, const struct drgn_object *obj)
 {
-	struct drgn_error *err;
-	struct drgn_qualified_type qualified_type;
-
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
@@ -1300,13 +1289,22 @@ drgn_object_address_of(struct drgn_object *res, const struct drgn_object *obj)
 					 "cannot take address of bit field");
 	}
 
-	err = drgn_type_index_pointer_type(&obj->prog->tindex,
-					   drgn_object_qualified_type(obj),
-					   NULL, &qualified_type.type);
+	struct drgn_qualified_type qualified_type =
+		drgn_object_qualified_type(obj);
+	uint8_t word_size;
+	struct drgn_error *err =
+		drgn_program_word_size(drgn_object_program(obj), &word_size);
 	if (err)
 		return err;
-	qualified_type.qualifiers = 0;
-	return drgn_object_set_unsigned(res, qualified_type,
+	struct drgn_qualified_type result_type;
+	err = drgn_pointer_type_create(drgn_object_program(obj), qualified_type,
+				       word_size,
+				       drgn_type_language(qualified_type.type),
+				       &result_type.type);
+	if (err)
+		return err;
+	result_type.qualifiers = 0;
+	return drgn_object_set_unsigned(res, result_type,
 					obj->reference.address, 0);
 }
 
@@ -1317,12 +1315,13 @@ drgn_object_subscript(struct drgn_object *res, const struct drgn_object *obj,
 	struct drgn_error *err;
 	struct drgn_element_info element;
 
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
 
-	err = drgn_program_element_info(obj->prog, obj->type, &element);
+	err = drgn_program_element_info(drgn_object_program(obj), obj->type,
+					&element);
 	if (err)
 		return err;
 
@@ -1344,13 +1343,13 @@ drgn_object_member(struct drgn_object *res, const struct drgn_object *obj,
 	struct drgn_error *err;
 	struct drgn_member_info member;
 
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
 
-	err = drgn_program_member_info(obj->prog, obj->type, member_name,
-				       &member);
+	err = drgn_program_member_info(drgn_object_program(obj), obj->type,
+				       member_name, &member);
 	if (err)
 		return err;
 	return drgn_object_slice(res, obj, member.qualified_type,
@@ -1366,7 +1365,7 @@ struct drgn_error *drgn_object_member_dereference(struct drgn_object *res,
 	struct drgn_member_value *member;
 	struct drgn_qualified_type qualified_type;
 
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
@@ -1377,10 +1376,10 @@ struct drgn_error *drgn_object_member_dereference(struct drgn_object *res,
 				       obj->type);
 	}
 
-	err = drgn_type_index_find_member(&obj->prog->tindex,
-					  drgn_type_type(underlying_type).type,
-					  member_name, strlen(member_name),
-					  &member);
+	err = drgn_program_find_member(drgn_object_program(obj),
+				       drgn_type_type(underlying_type).type,
+				       member_name, strlen(member_name),
+				       &member);
 	if (err)
 		return err;
 
@@ -1398,12 +1397,7 @@ drgn_object_container_of(struct drgn_object *res, const struct drgn_object *obj,
 			 struct drgn_qualified_type qualified_type,
 			 const char *member_designator)
 {
-	const struct drgn_language *lang = drgn_object_language(obj);
-	struct drgn_error *err;
-	uint64_t address, bit_offset;
-	struct drgn_qualified_type result_type;
-
-	if (res->prog != obj->prog) {
+	if (drgn_object_program(res) != drgn_object_program(obj)) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "objects are from different programs");
 	}
@@ -1414,8 +1408,12 @@ drgn_object_container_of(struct drgn_object *res, const struct drgn_object *obj,
 				       obj->type);
 	}
 
-	err = lang->bit_offset(obj->prog, qualified_type.type,
-			       member_designator, &bit_offset);
+	const struct drgn_language *lang = drgn_object_language(obj);
+	uint64_t bit_offset;
+	struct drgn_error *err = lang->bit_offset(drgn_object_program(obj),
+						  qualified_type.type,
+						  member_designator,
+						  &bit_offset);
 	if (err)
 		return err;
 	if (bit_offset % 8) {
@@ -1423,12 +1421,20 @@ drgn_object_container_of(struct drgn_object *res, const struct drgn_object *obj,
 					 "container_of() member is not byte-aligned");
 	}
 
+	uint64_t address;
 	err = drgn_object_value_unsigned(obj, &address);
 	if (err)
 		return err;
 
-	err = drgn_type_index_pointer_type(&obj->prog->tindex, qualified_type,
-					   NULL, &result_type.type);
+	uint8_t word_size;
+	err = drgn_program_word_size(drgn_object_program(obj), &word_size);
+	if (err)
+		return err;
+	struct drgn_qualified_type result_type;
+	err = drgn_pointer_type_create(drgn_object_program(obj), qualified_type,
+				       word_size,
+				       drgn_type_language(qualified_type.type),
+				       &result_type.type);
 	if (err)
 		return err;
 	result_type.qualifiers = 0;

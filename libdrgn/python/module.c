@@ -1,11 +1,12 @@
 // Copyright (c) Facebook, Inc. and its affiliates.
 // SPDX-License-Identifier: GPL-3.0+
 
-#include "drgnpy.h"
-#include "../internal.h"
 #ifdef WITH_KDUMPFILE
 #include <libkdumpfile/kdumpfile.h>
 #endif
+
+#include "drgnpy.h"
+#include "../path.h"
 
 PyObject *MissingDebugInfoError;
 PyObject *OutOfBoundsError;
@@ -88,33 +89,6 @@ static PyMethodDef drgn_methods[] = {
 	 METH_NOARGS, drgn_program_from_kernel_DOC},
 	{"program_from_pid", (PyCFunction)program_from_pid,
 	 METH_VARARGS | METH_KEYWORDS, drgn_program_from_pid_DOC},
-	{"void_type", (PyCFunction)void_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_void_type_DOC},
-	{"int_type", (PyCFunction)int_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_int_type_DOC},
-	{"bool_type", (PyCFunction)bool_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_bool_type_DOC},
-	{"float_type", (PyCFunction)float_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_float_type_DOC},
-	{"complex_type", (PyCFunction)complex_type,
-	 METH_VARARGS | METH_KEYWORDS, drgn_complex_type_DOC},
-	{"struct_type", (PyCFunction)struct_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_struct_type_DOC},
-	{"union_type", (PyCFunction)union_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_union_type_DOC},
-	{"class_type", (PyCFunction)class_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_class_type_DOC},
-	{"enum_type", (PyCFunction)enum_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_enum_type_DOC},
-	{"typedef_type", (PyCFunction)typedef_type,
-	 METH_VARARGS | METH_KEYWORDS,
-	 drgn_typedef_type_DOC},
-	{"pointer_type", (PyCFunction)pointer_type,
-	 METH_VARARGS | METH_KEYWORDS, drgn_pointer_type_DOC},
-	{"array_type", (PyCFunction)array_type, METH_VARARGS | METH_KEYWORDS,
-	 drgn_array_type_DOC},
-	{"function_type", (PyCFunction)function_type,
-	 METH_VARARGS | METH_KEYWORDS, drgn_function_type_DOC},
 	{"_linux_helper_read_vm", (PyCFunction)drgnpy_linux_helper_read_vm,
 	 METH_VARARGS | METH_KEYWORDS},
 	{"_linux_helper_radix_tree_lookup",
@@ -127,9 +101,6 @@ static PyMethodDef drgn_methods[] = {
 	{"_linux_helper_pid_task", (PyCFunction)drgnpy_linux_helper_pid_task,
 	 METH_VARARGS | METH_KEYWORDS},
 	{"_linux_helper_find_task", (PyCFunction)drgnpy_linux_helper_find_task,
-	 METH_VARARGS | METH_KEYWORDS},
-	{"_linux_helper_task_state_to_char",
-	 (PyCFunction)drgnpy_linux_helper_task_state_to_char,
 	 METH_VARARGS | METH_KEYWORDS},
 	{"_linux_helper_kaslr_offset",
 	 (PyCFunction)drgnpy_linux_helper_kaslr_offset,
@@ -148,6 +119,66 @@ static struct PyModuleDef drgnmodule = {
 	drgn_methods,
 };
 
+/*
+ * These are for type checking and aren't strictly required at runtime, but
+ * adding them anyways results in better pydoc output and saves us from fiddling
+ * with typing.TYPE_CHECKING/forward references.
+ */
+static int add_type_aliases(PyObject *m)
+{
+	/*
+	 * This should be a subclass of typing.Protocol, but that is only
+	 * available since Python 3.8.
+	 */
+	PyObject *IntegerLike = PyType_FromSpec(&(PyType_Spec){
+		.name = "_drgn.IntegerLike",
+		.flags = Py_TPFLAGS_DEFAULT,
+		.slots = (PyType_Slot []){{0, NULL}},
+	});
+       if (!IntegerLike)
+	       return -1;
+       if (PyModule_AddObject(m, "IntegerLike", IntegerLike) == -1) {
+	       Py_DECREF(IntegerLike);
+	       return -1;
+       }
+
+       PyObject *os_module = PyImport_ImportModule("os");
+       if (!os_module)
+	       return -1;
+       PyObject *os_PathLike = PyObject_GetAttrString(os_module, "PathLike");
+       Py_DECREF(os_module);
+       if (!os_PathLike)
+	       return -1;
+       PyObject *item = Py_BuildValue("OOO", &PyUnicode_Type, &PyBytes_Type,
+				      os_PathLike);
+       Py_DECREF(os_PathLike);
+       if (!item)
+	       return -1;
+
+       PyObject *typing_module = PyImport_ImportModule("typing");
+       if (!typing_module) {
+	       Py_DECREF(item);
+	       return -1;
+       }
+       PyObject *typing_Union = PyObject_GetAttrString(typing_module, "Union");
+       Py_DECREF(typing_module);
+       if (!typing_Union) {
+	       Py_DECREF(item);
+	       return -1;
+       }
+
+       PyObject *Path = PyObject_GetItem(typing_Union, item);
+       Py_DECREF(typing_Union);
+       Py_DECREF(item);
+       if (!Path)
+	       return -1;
+       if (PyModule_AddObject(m, "Path", Path) == -1) {
+	       Py_DECREF(Path);
+	       return -1;
+       }
+       return 0;
+}
+
 DRGNPY_PUBLIC PyMODINIT_FUNC PyInit__drgn(void)
 {
 	PyObject *m;
@@ -158,7 +189,7 @@ DRGNPY_PUBLIC PyMODINIT_FUNC PyInit__drgn(void)
 	if (!m)
 		return NULL;
 
-	if (add_module_constants(m) == -1)
+	if (add_module_constants(m) == -1 || add_type_aliases(m) == -1)
 		goto err;
 
 	FaultError_type.tp_base = (PyTypeObject *)PyExc_Exception;

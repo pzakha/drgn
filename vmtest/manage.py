@@ -1,7 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 # SPDX-License-Identifier: GPL-3.0+
 
-import aiohttp
 import argparse
 import asyncio
 import difflib
@@ -30,10 +29,11 @@ from typing import (
     Tuple,
 )
 import urllib.parse
+
+import aiohttp
 from yarl import URL
 
 from util import nproc
-
 
 logger = logging.getLogger("asyncio")
 
@@ -296,7 +296,7 @@ class Uploader:
                     params = {}
             else:
                 params = {
-                    "cursor": {"offset": offset, "session_id": session_id,},
+                    "cursor": {"offset": offset, "session_id": session_id},
                 }
                 if last:
                     endpoint = "upload_session/finish"

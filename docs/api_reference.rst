@@ -7,7 +7,7 @@ Programs
 --------
 
 .. drgndoc:: Program
-    :include: __getitem__
+    :exclude: (void|int|bool|float|complex|struct|union|class|enum|typedef|pointer|array|function)_type
 .. drgndoc:: ProgramFlags
 .. drgndoc:: FindObjectFlags
 
@@ -57,7 +57,6 @@ Objects
 -------
 
 .. drgndoc:: Object
-    :include: __getattribute__|__getitem__|__len__
 .. drgndoc:: NULL
 .. drgndoc:: cast
 .. drgndoc:: reinterpret
@@ -97,25 +96,27 @@ Type Constructors
 Custom drgn types can be created with the following factory functions. These
 can be used just like types obtained from :meth:`Program.type()`.
 
-.. drgndoc:: void_type
-.. drgndoc:: int_type
-.. drgndoc:: bool_type
-.. drgndoc:: float_type
-.. drgndoc:: complex_type
-.. drgndoc:: struct_type
-.. drgndoc:: union_type
-.. drgndoc:: class_type
-.. drgndoc:: enum_type
-.. drgndoc:: typedef_type
-.. drgndoc:: pointer_type
-.. drgndoc:: array_type
-.. drgndoc:: function_type
+.. drgndoc:: Program.void_type
+.. drgndoc:: Program.int_type
+.. drgndoc:: Program.bool_type
+.. drgndoc:: Program.float_type
+.. drgndoc:: Program.complex_type
+.. drgndoc:: Program.struct_type
+.. drgndoc:: Program.union_type
+.. drgndoc:: Program.class_type
+.. drgndoc:: Program.enum_type
+.. drgndoc:: Program.typedef_type
+.. drgndoc:: Program.pointer_type
+.. drgndoc:: Program.array_type
+.. drgndoc:: Program.function_type
 
 Miscellaneous
 -------------
 
 .. drgndoc:: sizeof
 .. drgndoc:: execscript
+.. drgndoc:: IntegerLike
+.. drgndoc:: Path
 
 Exceptions
 ----------
