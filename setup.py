@@ -18,7 +18,6 @@ import shlex
 import subprocess
 import sys
 
-import pkg_resources
 from setuptools import Command, find_packages, setup
 from setuptools.command.build_ext import build_ext as _build_ext
 from setuptools.command.egg_info import egg_info as _egg_info
@@ -128,7 +127,7 @@ class egg_info(_egg_info):
 class test(Command):
     description = "run unit tests after in-place build"
 
-    KERNELS = ["5.9", "5.8", "5.7", "5.6", "5.5", "5.4", "4.19", "4.14", "4.9", "4.4"]
+    KERNELS = ["5.10", "5.9", "5.8", "5.7", "5.6", "5.4", "4.19", "4.14", "4.9", "4.4"]
 
     user_options = [
         (
@@ -141,8 +140,7 @@ class test(Command):
             "extra-kernels=",
             "k",
             "additional kernels to run Linux kernel helper tests on in a virtual machine "
-            "(comma-separated list of kernel build directory path or "
-            "wildcard pattern matching uploaded kernel release strings)",
+            "(comma-separated list of wildcard patterns matching uploaded kernel releases)",
         ),
         (
             "vmtest-dir=",
@@ -173,16 +171,17 @@ class test(Command):
         test = unittest.main(module=None, argv=argv, exit=False)
         return test.result.wasSuccessful()
 
-    def _run_vm(self, *, vmlinux, vmlinuz, build_dir):
+    def _run_vm(self, kernel_dir):
+        from pathlib import Path
+
         import vmtest.vm
 
         command = fr"""cd {shlex.quote(os.getcwd())} &&
 	DRGN_RUN_LINUX_HELPER_TESTS=1 {shlex.quote(sys.executable)} -Bm \
 		unittest discover -t . -s tests/helpers/linux {"-v" if self.verbose else ""}"""
-        command = vmtest.vm.install_vmlinux_precommand(command, vmlinux)
         try:
             returncode = vmtest.vm.run_in_vm(
-                command, vmlinuz=vmlinuz, build_dir=build_dir
+                command, Path(kernel_dir), Path(self.vmtest_dir)
             )
         except vmtest.vm.LostVMError as e:
             self.announce(f"error: {e}", log.ERROR)
@@ -191,15 +190,15 @@ class test(Command):
         return returncode == 0
 
     def run(self):
-        import vmtest.resolver
+        from pathlib import Path
+
+        from vmtest.download import KernelDownloader
 
         # Start downloads ASAP so that they're hopefully done by the time we
         # need them.
-        with vmtest.resolver.KernelResolver(self.kernels, self.vmtest_dir) as resolver:
+        with KernelDownloader(self.kernels, Path(self.vmtest_dir)) as downloader:
             if self.kernels:
-                self.announce(
-                    "downloading/preparing kernels in the background", log.INFO
-                )
+                self.announce("downloading kernels in the background", log.INFO)
             self.run_command("egg_info")
             self.reinitialize_command("build_ext", inplace=1)
             self.run_command("build_ext")
@@ -215,18 +214,14 @@ class test(Command):
                 failed.append("local")
 
             if self.kernels:
-                for kernel in resolver:
+                for kernel in downloader:
                     self.announce(
-                        f"running tests in VM on Linux {kernel.release}", log.INFO
+                        f"running tests in VM on Linux {kernel.name}", log.INFO
                     )
-                    if self._run_vm(
-                        vmlinux=kernel.vmlinux,
-                        vmlinuz=kernel.vmlinuz,
-                        build_dir=self.vmtest_dir,
-                    ):
-                        passed.append(kernel.release)
+                    if self._run_vm(kernel):
+                        passed.append(kernel.name)
                     else:
-                        failed.append(kernel.release)
+                        failed.append(kernel.name)
 
                 if passed:
                     self.announce(f'Passed: {", ".join(passed)}', log.INFO)
@@ -240,49 +235,73 @@ class test(Command):
 
 
 def get_version():
-    if not os.path.exists(".git"):
-        # If this is a source distribution, get the version from the egg
-        # metadata.
-        return pkg_resources.get_distribution("drgn").version
-
-    with open("libdrgn/configure.ac", "r") as f:
-        version = re.search(r"AC_INIT\(\[drgn\], \[([^]]*)\]", f.read()).group(1)
-
-    # Read the Docs modifies the working tree (namely, docs/conf.py). We don't
-    # want the documentation to display a dirty version, so ignore
-    # modifications for RTD builds.
-    dirty = os.getenv("READTHEDOCS") != "True" and bool(
-        subprocess.check_output(
-            ["git", "status", "-uno", "--porcelain"],
-            # Use the environment variable instead of --no-optional-locks to
-            # support Git < 2.14.
-            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
-        )
-    )
-
     try:
-        count = int(
+        with open("drgn/internal/version.py", "r") as f:
+            version_py = f.read()
+    except FileNotFoundError:
+        version_py = None
+
+    # The public version always comes from configure.ac.
+    with open("libdrgn/configure.ac", "r") as f:
+        public_version = re.search(r"AC_INIT\(\[drgn\], \[([^]]*)\]", f.read()).group(1)
+    # Default local version if we fail.
+    local_version = "+unknown"
+
+    # If this is a git repository, use a git-describe(1)-esque local version.
+    # Otherwise, get the local version saved in the sdist.
+    if os.path.exists(".git"):
+        # Read the Docs modifies the working tree (namely, docs/conf.py). We
+        # don't want the documentation to display a dirty version, so ignore
+        # modifications for RTD builds.
+        dirty = os.getenv("READTHEDOCS") != "True" and bool(
             subprocess.check_output(
-                ["git", "rev-list", "--count", f"v{version}.."],
-                stderr=subprocess.DEVNULL,
-                universal_newlines=True,
+                ["git", "status", "-uno", "--porcelain"],
+                # Use the environment variable instead of --no-optional-locks
+                # to support Git < 2.14.
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
             )
         )
-    except subprocess.CalledProcessError:
-        log.warn("warning: v%s tag not found", version)
-        count = 0
 
-    if count == 0:
-        if dirty:
-            version += "+dirty"
-        return version
+        try:
+            count = int(
+                subprocess.check_output(
+                    ["git", "rev-list", "--count", f"v{public_version}.."],
+                    stderr=subprocess.DEVNULL,
+                    universal_newlines=True,
+                )
+            )
+        except subprocess.CalledProcessError:
+            log.warn("warning: v%s tag not found", public_version)
+        else:
+            if count == 0:
+                local_version = "+dirty" if dirty else ""
+            else:
+                commit = subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"], universal_newlines=True
+                ).strip()
+                local_version = f"+{count}.g{commit}"
+                if dirty:
+                    local_version += ".dirty"
+    else:
+        if version_py is None:
+            # This isn't a proper sdist (maybe a git archive).
+            log.warn("warning: drgn/internal/version.py not found")
+        else:
+            # The saved version must start with the public version.
+            match = re.search(
+                fr'^version = "{re.escape(public_version)}([^"]*)"$', version_py, re.M
+            )
+            if match:
+                local_version = match.group(1)
+            else:
+                log.warn("warning: drgn/internal/version.py is invalid")
 
-    commit = subprocess.check_output(
-        ["git", "rev-parse", "--short", "HEAD"], universal_newlines=True
-    ).strip()
-    version += f"+{count}.g{commit}"
-    if dirty:
-        version += ".dirty"
+    version = public_version + local_version
+    # Update version.py if necessary.
+    new_version_py = f'version = "{version}"\n'
+    if new_version_py != version_py:
+        with open("drgn/internal/version.py", "w") as f:
+            f.write(new_version_py)
     return version
 
 
