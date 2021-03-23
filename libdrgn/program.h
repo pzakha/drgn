@@ -100,18 +100,14 @@ struct drgn_program {
 	/** Cache of deduplicated types. */
 	struct drgn_dedupe_type_set dedupe_types;
 	/**
-	 * List of created types that cannot be deduplicated.
+	 * List of created types that are not deduplicated: types with non-empty
+	 * lists of members, parameters, template parameters, or enumerators.
 	 *
-	 * Complete structure, union, and class types, as well as function
-	 * types, refer to lazily-evaluated types, so they cannot be easily
-	 * deduplicated.
+	 * Members, parameters, and template parameters contain lazily-evaluated
+	 * objects, so they cannot be easily deduplicated.
 	 *
-	 * Complete enumerated types could be deduplicated, but it's probably
-	 * not worth the effort of hashing and comparing long lists of
-	 * enumerators.
-	 *
-	 * All other types, including incomplete structure, union, class, and
-	 * enumerated types, are deduplicated.
+	 * Enumerators could be deduplicated, but it's probably not worth the
+	 * effort to hash and compare them.
 	 */
 	struct drgn_typep_vector created_types;
 	/** Cache for @ref drgn_program_find_member(). */
@@ -142,32 +138,24 @@ struct drgn_program {
 	 */
 	union {
 		/*
-		 * For the Linux kernel, PRSTATUS notes indexed by CPU. See @ref
-		 * drgn_architecture_info::linux_kernel_set_initial_registers
-		 * for why we don't use the PID map.
+		 * For the Linux kernel, PRSTATUS notes indexed by CPU. See
+		 * drgn_get_initial_registers() for why we don't use the PID
+		 * map.
 		 */
 		struct drgn_prstatus_vector prstatus_vector;
 		/* For userspace programs, PRSTATUS notes indexed by PID. */
 		struct drgn_prstatus_map prstatus_map;
 	};
-	/* See @ref drgn_object_stack_trace(). */
-	struct drgn_error *stack_trace_err;
-	/* See @ref drgn_object_stack_trace_next_thread(). */
-	const struct drgn_object *stack_trace_obj;
-	uint32_t stack_trace_tid;
 	bool prstatus_cached;
-	bool attached_dwfl_state;
 
 	/*
 	 * Linux kernel-specific.
 	 */
 	struct vmcoreinfo vmcoreinfo;
 	/* Cached PAGE_OFFSET. */
-	uint64_t page_offset;
+	struct drgn_object page_offset;
 	/* Cached vmemmap. */
-	uint64_t vmemmap;
-	/* Cached THREAD_SIZE. */
-	uint64_t thread_size;
+	struct drgn_object vmemmap;
 	/* Page table iterator for linux_helper_read_vm(). */
 	struct pgtable_iterator *pgtable_it;
 	/*
@@ -216,7 +204,7 @@ drgn_program_is_little_endian(struct drgn_program *prog, bool *ret)
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "program byte order is not known");
 	}
-	*ret = prog->platform.flags & DRGN_PLATFORM_IS_LITTLE_ENDIAN;
+	*ret = drgn_platform_is_little_endian(&prog->platform);
 	return NULL;
 }
 
@@ -227,12 +215,11 @@ drgn_program_is_little_endian(struct drgn_program *prog, bool *ret)
 static inline struct drgn_error *
 drgn_program_bswap(struct drgn_program *prog, bool *ret)
 {
-	bool is_little_endian;
-	struct drgn_error *err = drgn_program_is_little_endian(prog,
-							       &is_little_endian);
-	if (err)
-		return err;
-	*ret = is_little_endian != (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__);
+	if (!prog->has_platform) {
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
+					 "program byte order is not known");
+	}
+	*ret = drgn_platform_bswap(&prog->platform);
 	return NULL;
 }
 
@@ -243,18 +230,29 @@ drgn_program_is_64_bit(struct drgn_program *prog, bool *ret)
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "program word size is not known");
 	}
-	*ret = prog->platform.flags & DRGN_PLATFORM_IS_64_BIT;
+	*ret = drgn_platform_is_64_bit(&prog->platform);
 	return NULL;
 }
 
 static inline struct drgn_error *
-drgn_program_word_size(struct drgn_program *prog, uint8_t *ret)
+drgn_program_address_size(struct drgn_program *prog, uint8_t *ret)
 {
-	bool is_64_bit;
-	struct drgn_error *err = drgn_program_is_64_bit(prog, &is_64_bit);
-	if (err)
-		return err;
-	*ret = is_64_bit ? 8 : 4;
+	if (!prog->has_platform) {
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
+					 "program address size is not known");
+	}
+	*ret = drgn_platform_address_size(&prog->platform);
+	return NULL;
+}
+
+static inline struct drgn_error *
+drgn_program_address_mask(const struct drgn_program *prog, uint64_t *ret)
+{
+	if (!prog->has_platform) {
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
+					 "program address size is not known");
+	}
+	*ret = drgn_platform_address_mask(&prog->platform);
 	return NULL;
 }
 

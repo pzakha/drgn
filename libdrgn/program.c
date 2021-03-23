@@ -6,6 +6,7 @@
 #include <dwarf.h>
 #include <elf.h>
 #include <elfutils/libdw.h>
+#include <elfutils/version.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gelf.h>
@@ -33,8 +34,10 @@ DEFINE_HASH_TABLE_FUNCTIONS(drgn_prstatus_map, int_key_hash_pair, scalar_key_eq)
 
 static Elf_Type note_header_type(GElf_Phdr *phdr)
 {
+#if _ELFUTILS_PREREQ(0, 175)
 	if (phdr->p_align == 8)
 		return ELF_T_NHDR8;
+#endif
 	return ELF_T_NHDR;
 }
 
@@ -53,7 +56,7 @@ drgn_program_platform(struct drgn_program *prog)
 LIBDRGN_PUBLIC const struct drgn_language *
 drgn_program_language(struct drgn_program *prog)
 {
-	return drgn_language_or_default(prog->lang);
+	return prog->lang ? prog->lang : &drgn_default_language;
 }
 
 void drgn_program_set_platform(struct drgn_program *prog,
@@ -75,6 +78,8 @@ void drgn_program_init(struct drgn_program *prog,
 	prog->core_fd = -1;
 	if (platform)
 		drgn_program_set_platform(prog, platform);
+	drgn_object_init(&prog->page_offset, prog);
+	drgn_object_init(&prog->vmemmap, prog);
 }
 
 void drgn_program_deinit(struct drgn_program *prog)
@@ -86,6 +91,9 @@ void drgn_program_deinit(struct drgn_program *prog)
 			drgn_prstatus_map_deinit(&prog->prstatus_map);
 	}
 	free(prog->pgtable_it);
+
+	drgn_object_deinit(&prog->vmemmap);
+	drgn_object_deinit(&prog->page_offset);
 
 	drgn_object_index_deinit(&prog->oindex);
 	drgn_program_deinit_types(prog);
@@ -327,7 +335,8 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 		goto out_elf;
 	}
 
-	if (is_proc_kcore || vmcoreinfo_note) {
+	if ((is_proc_kcore || vmcoreinfo_note) &&
+	    platform.arch->linux_kernel_pgtable_iterator_next) {
 		/*
 		 * Try to read any memory that isn't in the core dump via the
 		 * page table.
@@ -572,14 +581,14 @@ static void drgn_program_set_language_from_main(struct drgn_debug_info *dbinfo)
 	struct drgn_dwarf_index_die *index_die;
 	while ((index_die = drgn_dwarf_index_iterator_next(&it))) {
 		Dwarf_Die die;
-		err = drgn_dwarf_index_get_die(index_die, &die, NULL);
+		err = drgn_dwarf_index_get_die(index_die, &die);
 		if (err) {
 			drgn_error_destroy(err);
 			continue;
 		}
 
 		const struct drgn_language *lang;
-		err = drgn_language_from_die(&die, &lang);
+		err = drgn_language_from_die(&die, false, &lang);
 		if (err) {
 			drgn_error_destroy(err);
 			continue;
@@ -1177,24 +1186,4 @@ drgn_program_element_info(struct drgn_program *prog, struct drgn_type *type,
 
 	ret->qualified_type = drgn_type_type(underlying_type);
 	return drgn_type_bit_size(ret->qualified_type.type, &ret->bit_size);
-}
-
-LIBDRGN_PUBLIC struct drgn_error *
-drgn_program_member_info(struct drgn_program *prog, struct drgn_type *type,
-			 const char *member_name, struct drgn_member_info *ret)
-{
-	struct drgn_error *err;
-	struct drgn_member_value *member;
-
-	err = drgn_program_find_member(prog, type, member_name,
-				       strlen(member_name), &member);
-	if (err)
-		return err;
-
-	err = drgn_lazy_type_evaluate(member->type, &ret->qualified_type);
-	if (err)
-		return err;
-	ret->bit_offset = member->bit_offset;
-	ret->bit_field_size = member->bit_field_size;
-	return NULL;
 }

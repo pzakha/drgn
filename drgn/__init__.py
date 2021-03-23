@@ -54,6 +54,7 @@ from _drgn import (
     Language,
     MissingDebugInfoError,
     Object,
+    ObjectAbsentError,
     OutOfBoundsError,
     Path,
     Platform,
@@ -71,18 +72,20 @@ from _drgn import (
     TypeKind,
     TypeMember,
     TypeParameter,
+    TypeTemplateParameter,
     _with_libkdumpfile as _with_libkdumpfile,
     cast,
     container_of,
     filename_matches,
     host_platform,
+    offsetof,
     program_from_core_dump,
     program_from_kernel,
     program_from_pid,
     reinterpret,
     sizeof,
 )
-from drgn.internal.version import version as __version__
+from drgn.internal.version import __version__ as __version__
 
 __all__ = (
     "Architecture",
@@ -93,6 +96,7 @@ __all__ = (
     "MissingDebugInfoError",
     "NULL",
     "Object",
+    "ObjectAbsentError",
     "OutOfBoundsError",
     "Path",
     "Platform",
@@ -110,11 +114,13 @@ __all__ = (
     "TypeKind",
     "TypeMember",
     "TypeParameter",
+    "TypeTemplateParameter",
     "cast",
     "container_of",
     "execscript",
     "filename_matches",
     "host_platform",
+    "offsetof",
     "program_from_core_dump",
     "program_from_kernel",
     "program_from_pid",
@@ -204,7 +210,7 @@ def execscript(path: str, *args: str) -> None:
         sys.argv.extend(args)
 
         with _open_code(path) as f:
-            code = pkgutil.read_code(f)  # type: ignore[attr-defined]
+            code = pkgutil.read_code(f)
         if code is None:
             with _open_code(path) as f:
                 code = compile(f.read(), path, "exec")

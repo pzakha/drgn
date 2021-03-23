@@ -20,7 +20,7 @@
 #include <string.h>
 
 #ifndef LIBDRGN_PUBLIC
-#define LIBDRGN_PUBLIC __attribute__((visibility("default")))
+#define LIBDRGN_PUBLIC __attribute__((__visibility__("default")))
 #endif
 
 #ifdef NDEBUG
@@ -28,6 +28,34 @@
 #else
 #define UNREACHABLE() assert(!"reachable")
 #endif
+
+#define HOST_LITTLE_ENDIAN (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+
+/**
+ * Switch statement with an enum controlling expression that must have a case
+ * for every enumeration value and a default case.
+ */
+#define SWITCH_ENUM_DEFAULT(expr, ...) {			\
+	_Pragma("GCC diagnostic push");				\
+	_Pragma("GCC diagnostic error \"-Wswitch-enum\"");	\
+	_Pragma("GCC diagnostic error \"-Wswitch-default\"");	\
+	switch (expr)  {					\
+	__VA_ARGS__						\
+	}							\
+	_Pragma("GCC diagnostic pop");				\
+}
+
+/**
+ * Switch statement with an enum controlling expression that must have a case
+ * for every enumeration value. The expression is assumed to have a valid
+ * enumeration value. Cases which are assumed not to be possible can be placed
+ * at the end of the statement.
+ */
+#define SWITCH_ENUM(expr, ...)		\
+	SWITCH_ENUM_DEFAULT(expr,	\
+	__VA_ARGS__			\
+	default: UNREACHABLE();		\
+	)
 
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -88,6 +116,13 @@ static inline void *malloc64(uint64_t size)
 	if (size > SIZE_MAX)
 		return NULL;
 	return malloc(size);
+}
+
+/** Return the maximum value of an @p n-byte unsigned integer. */
+static inline uint64_t uint_max(int n)
+{
+	assert(n >= 1 && n <= 8);
+	return UINT64_MAX >> (64 - 8 * n);
 }
 
 #endif /* DRGN_UTIL_H */

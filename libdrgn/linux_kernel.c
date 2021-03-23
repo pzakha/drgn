@@ -245,33 +245,6 @@ out:
 	return err;
 }
 
-struct drgn_error *linux_kernel_get_thread_size(struct drgn_program *prog,
-						uint64_t *ret)
-{
-	struct drgn_error *err;
-	struct drgn_qualified_type thread_union_type;
-	struct drgn_member_info stack_member;
-
-	if (!prog->thread_size) {
-		err = drgn_program_find_type(prog, "union thread_union", NULL,
-					     &thread_union_type);
-		if (err)
-			return err;
-		err = drgn_program_member_info(prog, thread_union_type.type,
-					       "stack", &stack_member);
-		if (err)
-			return err;
-		err = drgn_type_sizeof(stack_member.qualified_type.type,
-				       &prog->thread_size);
-		if (err) {
-			prog->thread_size = 0;
-			return err;
-		}
-	}
-	*ret = prog->thread_size;
-	return NULL;
-}
-
 struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 					    const char *filename,
 					    enum drgn_find_object_flags flags,
@@ -285,25 +258,15 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 
 		if (name_len == strlen("PAGE_OFFSET") &&
 		    memcmp(name, "PAGE_OFFSET", name_len) == 0) {
-			if (!prog->page_offset) {
+			if (prog->page_offset.kind == DRGN_OBJECT_ABSENT) {
 				if (!prog->has_platform ||
 				    !prog->platform.arch->linux_kernel_get_page_offset)
 					return &drgn_not_found;
-				err = prog->platform.arch->linux_kernel_get_page_offset(prog,
-											&prog->page_offset);
-				if (err) {
-					prog->page_offset = 0;
+				err = prog->platform.arch->linux_kernel_get_page_offset(&prog->page_offset);
+				if (err)
 					return err;
-				}
 			}
-
-			err = drgn_program_find_primitive_type(prog,
-							       DRGN_C_TYPE_UNSIGNED_LONG,
-							       &qualified_type.type);
-			if (err)
-				return err;
-			return drgn_object_set_unsigned(ret, qualified_type,
-							prog->page_offset, 0);
+			return drgn_object_copy(ret, &prog->page_offset);
 		} else if (name_len == strlen("PAGE_SHIFT") &&
 			   memcmp(name, "PAGE_SHIFT", name_len) == 0) {
 			err = drgn_program_find_primitive_type(prog,
@@ -334,20 +297,6 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 			return drgn_object_set_unsigned(ret, qualified_type,
 							~(prog->vmcoreinfo.page_size - 1),
 							0);
-		} else if (name_len == strlen("THREAD_SIZE") &&
-			   memcmp(name, "THREAD_SIZE", name_len) == 0) {
-			uint64_t thread_size;
-
-			err = linux_kernel_get_thread_size(prog, &thread_size);
-			if (err)
-				return err;
-			err = drgn_program_find_primitive_type(prog,
-							       DRGN_C_TYPE_UNSIGNED_LONG,
-							       &qualified_type.type);
-			if (err)
-				return err;
-			return drgn_object_set_unsigned(ret, qualified_type,
-							thread_size, 0);
 		} else if (name_len == strlen("UTS_RELEASE") &&
 			   memcmp(name, "UTS_RELEASE", name_len) == 0) {
 			size_t len;
@@ -365,30 +314,20 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 			if (err)
 				return err;
 			qualified_type.qualifiers = 0;
-			return drgn_object_set_buffer(ret, qualified_type,
-						      prog->vmcoreinfo.osrelease,
-						      0, 0,
-						      DRGN_PROGRAM_ENDIAN);
+			return drgn_object_set_from_buffer(ret, qualified_type,
+							   prog->vmcoreinfo.osrelease,
+							   len + 1, 0, 0);
 		} else if (name_len == strlen("vmemmap") &&
 			   memcmp(name, "vmemmap", name_len) == 0) {
-			if (!prog->vmemmap) {
+			if (prog->vmemmap.kind == DRGN_OBJECT_ABSENT) {
 				if (!prog->has_platform ||
 				    !prog->platform.arch->linux_kernel_get_vmemmap)
 					return &drgn_not_found;
-				err = prog->platform.arch->linux_kernel_get_vmemmap(prog,
-										    &prog->vmemmap);
-				if (err) {
-					prog->vmemmap = 0;
+				err = prog->platform.arch->linux_kernel_get_vmemmap(&prog->vmemmap);
+				if (err)
 					return err;
-				}
 			}
-
-			err = drgn_program_find_type(prog, "struct page *",
-						     NULL, &qualified_type);
-			if (err)
-				return err;
-			return drgn_object_set_unsigned(ret, qualified_type,
-							prog->vmemmap, 0);
+			return drgn_object_copy(ret, &prog->vmemmap);
 		}
 	}
 	return &drgn_not_found;
@@ -513,7 +452,7 @@ kernel_module_iterator_next_live(struct kernel_module_iterator *it)
  * destroyed.
  *
  * @return @c NULL on success, non-@c NULL on error. In particular, when there
- * are no more modules, a @ref DRGN_ERROR_STOP error is returned.
+ * are no more modules, returns &@ref drgn_stop.
  */
 static struct drgn_error *
 kernel_module_iterator_next(struct kernel_module_iterator *it)
@@ -1123,7 +1062,7 @@ cache_kernel_module_sections(struct kernel_module_iterator *kmod_it, Elf *elf,
 			}
 		}
 	}
-	if (err && err->code != DRGN_ERROR_STOP)
+	if (err && err != &drgn_stop)
 		goto out_section_it;
 	err = NULL;
 	if (start >= end)
@@ -1293,7 +1232,7 @@ kernel_module_iterator_error:
 	}
 	for (;;) {
 		err = kernel_module_iterator_next(&kmod_it);
-		if (err && err->code == DRGN_ERROR_STOP) {
+		if (err == &drgn_stop) {
 			err = NULL;
 			break;
 		} else if (err) {
@@ -1381,12 +1320,14 @@ report_kernel_modules(struct drgn_debug_info_load_state *load,
 	size_t module_name_offset = 0;
 	if (need_module_definition) {
 		struct drgn_qualified_type module_type;
-		struct drgn_member_info name_member;
+		struct drgn_type_member *name_member;
+		uint64_t name_bit_offset;
 		err = drgn_program_find_type(prog, "struct module", NULL,
 					     &module_type);
 		if (!err) {
-			err = drgn_program_member_info(prog, module_type.type,
-						       "name", &name_member);
+			err = drgn_type_find_member(module_type.type, "name",
+						    &name_member,
+						    &name_bit_offset);
 		}
 		if (err) {
 			return drgn_debug_info_report_error(load,
@@ -1394,7 +1335,7 @@ report_kernel_modules(struct drgn_debug_info_load_state *load,
 							    "could not get kernel module names",
 							    err);
 		}
-		module_name_offset = name_member.bit_offset / 8;
+		module_name_offset = name_bit_offset / 8;
 	}
 
 	struct kernel_module_table kmod_table = HASH_TABLE_INIT;

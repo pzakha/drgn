@@ -7,20 +7,27 @@
 #include "platform.h"
 #include "util.h"
 
+static const struct drgn_register *register_by_name_unknown(const char *name)
+{
+	return NULL;
+}
+
 const struct drgn_architecture_info arch_info_unknown = {
 	.name = "unknown",
 	.arch = DRGN_ARCH_UNKNOWN,
+	.register_by_name = register_by_name_unknown,
 };
 
 LIBDRGN_PUBLIC const struct drgn_platform drgn_host_platform = {
 #ifdef __x86_64__
 	.arch = &arch_info_x86_64,
+#elif __powerpc64__
+	.arch = &arch_info_ppc64,
 #else
 	.arch = &arch_info_unknown,
 #endif
 	.flags = ((sizeof(void *) == 8 ? DRGN_PLATFORM_IS_64_BIT : 0) |
-		  (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ ?
-		   DRGN_PLATFORM_IS_LITTLE_ENDIAN : 0)),
+		  (HOST_LITTLE_ENDIAN ? DRGN_PLATFORM_IS_LITTLE_ENDIAN : 0)),
 };
 
 LIBDRGN_PUBLIC struct drgn_error *
@@ -30,17 +37,20 @@ drgn_platform_create(enum drgn_architecture arch,
 	const struct drgn_architecture_info *arch_info;
 	struct drgn_platform *platform;
 
-	switch (arch) {
+	SWITCH_ENUM_DEFAULT(arch,
 	case DRGN_ARCH_UNKNOWN:
 		arch_info = &arch_info_unknown;
 		break;
 	case DRGN_ARCH_X86_64:
 		arch_info = &arch_info_x86_64;
 		break;
+	case DRGN_ARCH_PPC64:
+		arch_info = &arch_info_ppc64;
+		break;
 	default:
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "invalid architecture");
-	}
+	)
 	if (flags == DRGN_PLATFORM_DEFAULT_FLAGS) {
 		if (arch == DRGN_ARCH_UNKNOWN) {
 			return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
@@ -104,6 +114,9 @@ void drgn_platform_from_elf(GElf_Ehdr *ehdr, struct drgn_platform *ret)
 	case EM_X86_64:
 		arch = &arch_info_x86_64;
 		break;
+	case EM_PPC64:
+		arch = &arch_info_ppc64;
+		break;
 	default:
 		arch = &arch_info_unknown;
 		break;
@@ -124,13 +137,16 @@ drgn_platform_register(const struct drgn_platform *platform, size_t n)
 	return &platform->arch->registers[n];
 }
 
-LIBDRGN_PUBLIC const char *drgn_register_name(const struct drgn_register *reg)
+LIBDRGN_PUBLIC const struct drgn_register *
+drgn_platform_register_by_name(const struct drgn_platform *platform,
+			       const char *name)
 {
-	return reg->name;
+	return platform->arch->register_by_name(name);
 }
 
-LIBDRGN_PUBLIC enum drgn_register_number
-drgn_register_number(const struct drgn_register *reg)
+LIBDRGN_PUBLIC const char * const *
+drgn_register_names(const struct drgn_register *reg, size_t *num_names_ret)
 {
-	return reg->number;
+	*num_names_ret = reg->num_names;
+	return reg->names;
 }

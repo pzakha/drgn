@@ -140,12 +140,14 @@ def main():
     if args.source:
         sources = {os.path.realpath(source) for source in args.source}
 
+    os.makedirs(BUILD_BASE, exist_ok=True)
     subprocess.check_call(
         [
             "bear",
-            "--cdb",
+            "--output",
             CDB,
-            "-a",
+            "--append",
+            "--",
             sys.executable,
             "setup.py",
             "build",
@@ -166,9 +168,6 @@ def main():
         commands = json.load(f)
 
     for command in commands:
-        if "elfutils" in os.path.relpath(command["directory"]):
-            continue
-
         if (
             args.source
             and os.path.realpath(os.path.join(command["directory"], command["file"]))

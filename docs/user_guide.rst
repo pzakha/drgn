@@ -57,7 +57,7 @@ may exist in the memory of the program (a *reference*)::
 
     >>> Object(prog, 'int', address=0xffffffffc09031a0)
 
-Or, an object may be a temporary computed value (a *value*)::
+Or, an object may be a constant or temporary computed value (a *value*)::
 
     >>> Object(prog, 'int', value=4)
 
@@ -138,6 +138,24 @@ address it points to)::
     Object(prog, 'volatile unsigned long *', value=0xffffffffbe405000)
     >>> print(hex(jiffiesp.value_()))
     0xffffffffbe405000
+
+Absent Objects
+""""""""""""""
+
+In addition to reference objects and value objects, objects may also be
+*absent*.
+
+    >>> Object(prog, "int").value_()
+    Traceback (most recent call last):
+      File "<console>", line 1, in <module>
+    _drgn.ObjectAbsentError: object absent
+
+This represents an object whose value or address is not known. For example,
+this can happen if the object was optimized out of the program by the compiler.
+
+Any attempt to operate on an absent object results in a
+:exc:`drgn.ObjectAbsentError` exception, although basic information including
+its type may still be accessed.
 
 Helpers
 ^^^^^^^

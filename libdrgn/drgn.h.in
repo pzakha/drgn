@@ -19,6 +19,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/types.h>
 
 /**
@@ -78,9 +79,11 @@ enum drgn_error_code {
 	DRGN_ERROR_ZERO_DIVISION,
 	/** Array out of bounds */
 	DRGN_ERROR_OUT_OF_BOUNDS,
+	/** Operation was attempted with absent object. */
+	DRGN_ERROR_OBJECT_ABSENT,
 	/** Number of defined error codes. */
 	DRGN_NUM_ERROR_CODES,
-} __attribute__((packed));
+} __attribute__((__packed__));
 
 /**
  * libdrgn error.
@@ -132,10 +135,8 @@ extern struct drgn_error drgn_enomem;
 /**
  * Non-fatal lookup @ref drgn_error.
  *
- * This has a code of @ref DRGN_ERROR_LOOKUP. It should be returned from a @ref
- * drgn_type_find_fn() or @ref drgn_object_find_fn() to indicate that the entity
- * in question could not be found. It does not need to be passed to @ref
- * drgn_error_destroy() (but it can be).
+ * This has a code of @ref DRGN_ERROR_LOOKUP. It does not need to be passed to
+ * @ref drgn_error_destroy() (but it can be).
  */
 extern struct drgn_error drgn_not_found;
 
@@ -150,7 +151,7 @@ extern struct drgn_error drgn_not_found;
  */
 struct drgn_error *drgn_error_create(enum drgn_error_code code,
 				     const char *message)
-	__attribute__((returns_nonnull));
+	__attribute__((__returns_nonnull__));
 
 /**
  * Create a @ref drgn_error from a printf-style format.
@@ -164,7 +165,7 @@ struct drgn_error *drgn_error_create(enum drgn_error_code code,
  */
 struct drgn_error *drgn_error_format(enum drgn_error_code code,
 				     const char *format, ...)
-	__attribute__((returns_nonnull,format(printf, 2, 3)));
+	__attribute__((__returns_nonnull__, __format__(__printf__, 2, 3)));
 
 /**
  * Create a @ref DRGN_ERROR_OS @ref drgn_error.
@@ -177,7 +178,7 @@ struct drgn_error *drgn_error_format(enum drgn_error_code code,
  */
 struct drgn_error *drgn_error_create_os(const char *message, int errnum,
 					const char *path)
-	__attribute__((returns_nonnull));
+	__attribute__((__returns_nonnull__));
 
 /**
  * Create a @ref DRGN_ERROR_OS @ref drgn_error with a printf-style formatted
@@ -189,7 +190,7 @@ struct drgn_error *drgn_error_create_os(const char *message, int errnum,
  */
 struct drgn_error *drgn_error_format_os(const char *message, int errnum,
 					const char *path_format, ...)
-	__attribute__((returns_nonnull,format(printf, 3, 4)));
+	__attribute__((__returns_nonnull__, __format__(__printf__, 3, 4)));
 
 /**
  * Create a @ref DRGN_ERROR_FAULT @ref drgn_error.
@@ -198,7 +199,7 @@ struct drgn_error *drgn_error_format_os(const char *message, int errnum,
  * @param[in] address Address where the fault happened.
  */
 struct drgn_error *drgn_error_create_fault(const char *message, uint64_t address)
-	__attribute__((returns_nonnull));
+	__attribute__((__returns_nonnull__));
 
 /**
  *
@@ -211,7 +212,7 @@ struct drgn_error *drgn_error_create_fault(const char *message, uint64_t address
  */
 struct drgn_error *drgn_error_format_fault(uint64_t address,
 					   const char *format, ...)
-	__attribute__((returns_nonnull,format(printf, 2, 3)));
+	__attribute__((__returns_nonnull__, __format__(__printf__, 2, 3)));
 
 /*
  * Create a copy of a @ref drgn_error.
@@ -224,7 +225,7 @@ struct drgn_error *drgn_error_format_fault(uint64_t address,
  * memory, @ref drgn_enomem is returned instead.
  */
 struct drgn_error *drgn_error_copy(struct drgn_error *src)
-	__attribute__((returns_nonnull));
+	__attribute__((__returns_nonnull__));
 
 /**
  * Write a @ref drgn_error to a @c stdio stream.
@@ -254,65 +255,6 @@ void drgn_error_destroy(struct drgn_error *err);
 /**
  * @ingroup Types
  *
- * Type qualifiers.
- *
- * Some languages, like C, have the notion of qualifiers which add properties to
- * a type. Qualifiers are represented as a bitmask; each qualifier is a bit.
- */
-enum drgn_qualifiers {
-	/** Constant type. */
-	DRGN_QUALIFIER_CONST = (1 << 0),
-	/** Volatile type. */
-	DRGN_QUALIFIER_VOLATILE = (1 << 1),
-	/** Restrict type. */
-	DRGN_QUALIFIER_RESTRICT = (1 << 2),
-	/** Atomic type. */
-	DRGN_QUALIFIER_ATOMIC = (1 << 3),
-	/** Bitmask of all valid qualifiers. */
-	DRGN_ALL_QUALIFIERS = (1 << 4) - 1,
-} __attribute__((packed));
-
-/**
- * @ingroup LazyTypes
- *
- * Lazily-evaluated type.
- *
- * A lazy type may be in two states: unevaluated, in which case an arbitrary
- * callback must be called to evaluate the type, or evaluated, in which case the
- * type is cached. To evaluate a type, the thunk callback is called, the thunk
- * is freed, and the result is cached.
- *
- * This is for internal use only.
- */
-struct drgn_lazy_type {
-	union {
-		/** Type if it has already been evaluated. */
-		struct drgn_type *type;
-		/** Thunk if the type has not been evaluated yet. */
-		struct drgn_type_thunk *thunk;
-	};
-	/** Qualifiers, or -1 if the type has not been evaluated yet. */
-	enum drgn_qualifiers qualifiers;
-};
-
-/**
- * @defgroup Types Types
- *
- * Type descriptors.
- *
- * Types in a program are represented by @ref drgn_type.
- *
- * Type descriptors have various fields depending on the kind of type. For each
- * field @c foo, there is a @c drgn_type_kind_has_foo() helper which returns
- * whether the given kind of type has the field @c foo; a @c drgn_type_has_foo()
- * helper which does the same but takes a type; and a @c drgn_type_foo() helper
- * which returns the field. For members, enumerators, and parameters, there is
- * also a @c drgn_type_num_foo() helper.
- *
- * @{
- */
-
-/**
  * Kinds of types.
  *
  * Every type in a program supported by libdrgn falls into one of these
@@ -327,8 +269,6 @@ enum drgn_type_kind {
 	DRGN_TYPE_BOOL,
 	/** Floating-point type. */
 	DRGN_TYPE_FLOAT,
-	/** Complex type. */
-	DRGN_TYPE_COMPLEX,
 	/** Structure type. */
 	DRGN_TYPE_STRUCT,
 	/** Union type. */
@@ -345,130 +285,32 @@ enum drgn_type_kind {
 	DRGN_TYPE_ARRAY,
 	/** Function type. */
 	DRGN_TYPE_FUNCTION,
-} __attribute__((packed));
-
-/** Primitive types known to drgn. */
-enum drgn_primitive_type {
-	/* Primitive C types. */
-	DRGN_C_TYPE_VOID,
-	DRGN_C_TYPE_CHAR,
-	DRGN_C_TYPE_SIGNED_CHAR,
-	DRGN_C_TYPE_UNSIGNED_CHAR,
-	DRGN_C_TYPE_SHORT,
-	DRGN_C_TYPE_UNSIGNED_SHORT,
-	DRGN_C_TYPE_INT,
-	DRGN_C_TYPE_UNSIGNED_INT,
-	DRGN_C_TYPE_LONG,
-	DRGN_C_TYPE_UNSIGNED_LONG,
-	DRGN_C_TYPE_LONG_LONG,
-	DRGN_C_TYPE_UNSIGNED_LONG_LONG,
-	DRGN_C_TYPE_BOOL,
-	DRGN_C_TYPE_FLOAT,
-	DRGN_C_TYPE_DOUBLE,
-	DRGN_C_TYPE_LONG_DOUBLE,
-	DRGN_C_TYPE_SIZE_T,
-	DRGN_C_TYPE_PTRDIFF_T,
-	DRGN_PRIMITIVE_TYPE_NUM,
-	DRGN_NOT_PRIMITIVE_TYPE = DRGN_PRIMITIVE_TYPE_NUM,
-	/*
-	 * Make sure to update api_reference.rst and type.c when adding anything
-	 * here.
-	 */
-} __attribute__((packed));
-
-/** Member of a structure, union, or class type. */
-struct drgn_type_member {
-	/**
-	 * Type of the member.
-	 *
-	 * Access this with @ref drgn_member_type().
-	 */
-	struct drgn_lazy_type type;
-	/** Member name or @c NULL if it is unnamed. */
-	const char *name;
-	/**
-	 * Offset in bits from the beginning of the type to the beginning of
-	 * this member (i.e., for little-endian machines, the least significant
-	 * bit, and for big-endian machines, the most significant bit). Members
-	 * are usually aligned to at least a byte, so this is usually a multiple
-	 * of 8 (but that may not be the case for bit fields).
-	 */
-	uint64_t bit_offset;
-	/**
-	 * If this member is a bit field, the size of the field in bits. If this
-	 * member is not a bit field, 0.
-	 */
-	uint64_t bit_field_size;
-};
-
-/** Value of an enumerated type. */
-struct drgn_type_enumerator {
-	/** Enumerator name. */
-	const char *name;
-	union {
-		/** Enumerator value if the type is signed. */
-		int64_t svalue;
-		/** Enumerator value if the type is unsigned. */
-		uint64_t uvalue;
-	};
-};
-
-/** Parameter of a function type. */
-struct drgn_type_parameter {
-	/**
-	 * Type of the parameter.
-	 *
-	 * Access this with @ref drgn_parameter_type().
-	 */
-	struct drgn_lazy_type type;
-	/** Parameter name or @c NULL if it is unnamed. */
-	const char *name;
-};
+} __attribute__((__packed__));
 
 /**
- * Language-agnostic type descriptor.
+ * @ingroup Types
  *
- * This structure should not be accessed directly; see @ref Types.
+ * Type qualifiers.
+ *
+ * Some languages, like C, have the notion of qualifiers which add properties to
+ * a type. Qualifiers are represented as a bitmask; each qualifier is a bit.
  */
-struct drgn_type {
-	/** @privatesection */
-	struct {
-		enum drgn_type_kind kind;
-		bool is_complete;
-		enum drgn_primitive_type primitive;
-		/* These are the qualifiers for the wrapped type, not this type. */
-		enum drgn_qualifiers qualifiers;
-		struct drgn_program *program;
-		const struct drgn_language *language;
-		/*
-		 * This mess of unions is used to make this as compact as possible. Use
-		 * the provided helpers and don't think about it.
-		 */
-		union {
-			const char *name;
-			const char *tag;
-			size_t num_parameters;
-		};
-		union {
-			uint64_t size;
-			uint64_t length;
-			size_t num_enumerators;
-			bool is_variadic;
-		};
-		union {
-			bool is_signed;
-			size_t num_members;
-			struct drgn_type *type;
-		};
-		union {
-			struct drgn_type_member *members;
-			struct drgn_type_enumerator *enumerators;
-			struct drgn_type_parameter *parameters;
-		};
-	} _private;
-};
+enum drgn_qualifiers {
+	/** Constant type. */
+	DRGN_QUALIFIER_CONST = (1 << 0),
+	/** Volatile type. */
+	DRGN_QUALIFIER_VOLATILE = (1 << 1),
+	/** Restrict type. */
+	DRGN_QUALIFIER_RESTRICT = (1 << 2),
+	/** Atomic type. */
+	DRGN_QUALIFIER_ATOMIC = (1 << 3),
+	/** Bitmask of all valid qualifiers. */
+	DRGN_ALL_QUALIFIERS = (1 << 4) - 1,
+} __attribute__((__packed__));
 
 /**
+ * @ingroup Types
+ *
  * Qualified type.
  *
  * A type with qualifiers.
@@ -482,422 +324,11 @@ struct drgn_qualified_type {
 	enum drgn_qualifiers qualifiers;
 };
 
-/** Get the kind of a type. */
-static inline enum drgn_type_kind drgn_type_kind(struct drgn_type *type)
-{
-	return type->_private.kind;
-}
-
-/** Get the primitive type corresponding to a @ref drgn_type. */
-static inline enum drgn_primitive_type
-drgn_type_primitive(struct drgn_type *type)
-{
-	return type->_private.primitive;
-}
-
-/**
- * Get whether a type is complete (i.e., the type definition is known).
- *
- * This is always @c false for the void type. It may be @c false for structure,
- * union, class, enumerated, and array types, as well as typedef types where the
- * underlying type is one of those. Otherwise, it is always @c true.
- */
-static inline bool drgn_type_is_complete(struct drgn_type *type)
-{
-	return type->_private.is_complete;
-}
-
 static inline struct drgn_program *
-drgn_type_program(struct drgn_type *type)
-{
-	return type->_private.program;
-}
+drgn_type_program(struct drgn_type *type);
 
-/** Get the language of a type. */
 static inline const struct drgn_language *
-drgn_type_language(struct drgn_type *type)
-{
-	return type->_private.language;
-}
-
-/**
- * Get whether a kind of type has a name. This is true for integer, boolean,
- * floating-point, complex, and typedef types.
- */
-static inline bool drgn_type_kind_has_name(enum drgn_type_kind kind)
-{
-	return (kind == DRGN_TYPE_INT ||
-		kind == DRGN_TYPE_BOOL ||
-		kind == DRGN_TYPE_FLOAT ||
-		kind == DRGN_TYPE_COMPLEX ||
-		kind == DRGN_TYPE_TYPEDEF);
-}
-/** Get whether a type has a name. @sa drgn_type_kind_has_name() */
-static inline bool drgn_type_has_name(struct drgn_type *type)
-{
-	return drgn_type_kind_has_name(drgn_type_kind(type));
-}
-/**
- * Get the name of a type. @ref drgn_type_has_name() must be true for this type.
- */
-static inline const char *drgn_type_name(struct drgn_type *type)
-{
-	assert(drgn_type_has_name(type));
-	return type->_private.name;
-}
-
-/**
- * Get whether a kind of type has a size. This is true for integer, boolean,
- * floating-point, complex, structure, union, class, and pointer types.
- */
-static inline bool drgn_type_kind_has_size(enum drgn_type_kind kind)
-{
-	return (kind == DRGN_TYPE_INT ||
-		kind == DRGN_TYPE_BOOL ||
-		kind == DRGN_TYPE_FLOAT ||
-		kind == DRGN_TYPE_COMPLEX ||
-		kind == DRGN_TYPE_STRUCT ||
-		kind == DRGN_TYPE_UNION ||
-		kind == DRGN_TYPE_CLASS ||
-		kind == DRGN_TYPE_POINTER);
-}
-/** Get whether a type has a size. @sa drgn_type_kind_has_size() */
-static inline bool drgn_type_has_size(struct drgn_type *type)
-{
-	return drgn_type_kind_has_size(drgn_type_kind(type));
-}
-/**
- * Get the size of a type in bytes. @ref drgn_type_has_size() must be true for
- * this type.
- */
-static inline uint64_t drgn_type_size(struct drgn_type *type)
-{
-	assert(drgn_type_has_size(type));
-	return type->_private.size;
-}
-
-/**
- * Get whether a kind of type has a signedness. This is true for integer types.
- */
-static inline bool drgn_type_kind_has_is_signed(enum drgn_type_kind kind)
-{
-	return kind == DRGN_TYPE_INT;
-}
-/** Get whether a type has a signedness. @sa drgn_type_kind_has_is_signed() */
-static inline bool drgn_type_has_is_signed(struct drgn_type *type)
-{
-	return drgn_type_kind_has_is_signed(drgn_type_kind(type));
-}
-/**
- * Get the signedness of a type. @ref drgn_type_has_is_signed() must be true for
- * this type.
- */
-static inline bool drgn_type_is_signed(struct drgn_type *type)
-{
-	assert(drgn_type_has_is_signed(type));
-	return type->_private.is_signed;
-}
-
-/**
- * Get whether a kind of type has a tag. This is true for structure, union,
- * class, and enumerated types.
- */
-static inline bool drgn_type_kind_has_tag(enum drgn_type_kind kind)
-{
-	return (kind == DRGN_TYPE_STRUCT ||
-		kind == DRGN_TYPE_UNION ||
-		kind == DRGN_TYPE_CLASS ||
-		kind == DRGN_TYPE_ENUM);
-}
-/** Get whether a type has a tag. @sa drgn_type_kind_has_tag() */
-static inline bool drgn_type_has_tag(struct drgn_type *type)
-{
-	return drgn_type_kind_has_tag(drgn_type_kind(type));
-}
-/**
- * Get the tag of a type. @ref drgn_type_has_tag() must be true for this type.
- */
-static inline const char *drgn_type_tag(struct drgn_type *type)
-{
-	assert(drgn_type_has_tag(type));
-	return type->_private.tag;
-}
-
-/**
- * Get whether a kind of type has members. This is true for structure, union,
- * and class types.
- */
-static inline bool drgn_type_kind_has_members(enum drgn_type_kind kind)
-{
-	return (kind == DRGN_TYPE_STRUCT ||
-		kind == DRGN_TYPE_UNION ||
-		kind == DRGN_TYPE_CLASS);
-}
-/** Get whether a type has members. @sa drgn_type_kind_has_members() */
-static inline bool drgn_type_has_members(struct drgn_type *type)
-{
-	return drgn_type_kind_has_members(drgn_type_kind(type));
-}
-/**
- * Get the members of a type. @ref drgn_type_has_members() must be true for this
- * type.
- */
-static inline struct drgn_type_member *drgn_type_members(struct drgn_type *type)
-{
-	assert(drgn_type_has_members(type));
-	return type->_private.members;
-}
-/**
- * Get the number of members of a type. @ref drgn_type_has_members() must be
- * true for this type. If the type is incomplete, this is always zero.
- */
-static inline size_t drgn_type_num_members(struct drgn_type *type)
-{
-	assert(drgn_type_has_members(type));
-	return type->_private.num_members;
-}
-
-/**
- * Get whether a kind of type has a wrapped type. This is true for complex,
- * enumerated, typedef, pointer, array, and function types.
- */
-static inline bool drgn_type_kind_has_type(enum drgn_type_kind kind)
-{
-	return (kind == DRGN_TYPE_COMPLEX ||
-		kind == DRGN_TYPE_ENUM ||
-		kind == DRGN_TYPE_TYPEDEF ||
-		kind == DRGN_TYPE_POINTER ||
-		kind == DRGN_TYPE_ARRAY ||
-		kind == DRGN_TYPE_FUNCTION);
-}
-/** Get whether a type has a wrapped type. @sa drgn_type_kind_has_type() */
-static inline bool drgn_type_has_type(struct drgn_type *type)
-{
-	return drgn_type_kind_has_type(drgn_type_kind(type));
-}
-/**
- * Get the type wrapped by this type.
- *
- * For a complex type, this is the corresponding real type.
- *
- * For an enumerated type, this is the compatible integer type. It is @c NULL if
- * the enumerated type is incomplete.
- *
- * For a typedef type, this is the aliased type.
- *
- * For a pointer type, this is the referenced type.
- *
- * For an array type, this is the element type.
- *
- * For a function type, this is the return type.
- */
-static inline struct drgn_qualified_type
-drgn_type_type(struct drgn_type *type)
-{
-	assert(drgn_type_has_type(type));
-	return (struct drgn_qualified_type){
-		.type = type->_private.type,
-		.qualifiers = type->_private.qualifiers,
-	};
-}
-
-/**
- * Get whether a kind of type has enumerators. This is true for enumerated
- * types.
- */
-static inline bool drgn_type_kind_has_enumerators(enum drgn_type_kind kind)
-{
-	return kind == DRGN_TYPE_ENUM;
-}
-/** Get whether a type has enumerators. @sa drgn_type_kind_has_enumerators() */
-static inline bool drgn_type_has_enumerators(struct drgn_type *type)
-{
-	return drgn_type_kind_has_enumerators(drgn_type_kind(type));
-}
-/**
- * Get the enumerators of a type. @ref drgn_type_has_enumerators() must be true
- * for this type.
- */
-static inline struct drgn_type_enumerator *
-drgn_type_enumerators(struct drgn_type *type)
-{
-	assert(drgn_type_has_enumerators(type));
-	return type->_private.enumerators;
-}
-/**
- * Get the number of enumerators of a type. @ref drgn_type_has_enumerators()
- * must be true for this type. If the type is incomplete, this is always zero.
- */
-static inline size_t drgn_type_num_enumerators(struct drgn_type *type)
-{
-	assert(drgn_type_has_enumerators(type));
-	return type->_private.num_enumerators;
-}
-
-/** Get whether a kind of type has a length. This is true for array types. */
-static inline bool drgn_type_kind_has_length(enum drgn_type_kind kind)
-{
-	return kind == DRGN_TYPE_ARRAY;
-}
-/** Get whether a type has a length. @sa drgn_type_kind_has_length() */
-static inline bool drgn_type_has_length(struct drgn_type *type)
-{
-	return drgn_type_kind_has_length(drgn_type_kind(type));
-}
-/**
- * Get the length of a type. @ref drgn_type_has_length() must be true for this
- * type. If the type is incomplete, this is always zero.
- */
-static inline uint64_t drgn_type_length(struct drgn_type *type)
-{
-	assert(drgn_type_has_length(type));
-	return type->_private.length;
-}
-
-/**
- * Get whether a kind of type has parameters. This is true for function types.
- */
-static inline bool drgn_type_kind_has_parameters(enum drgn_type_kind kind)
-{
-	return kind == DRGN_TYPE_FUNCTION;
-}
-/** Get whether a type has parameters. @sa drgn_type_kind_has_parameters() */
-static inline bool drgn_type_has_parameters(struct drgn_type *type)
-{
-	return drgn_type_kind_has_parameters(drgn_type_kind(type));
-}
-/**
- * Get the parameters of a type. @ref drgn_type_has_parameters() must be true
- * for this type.
- */
-static inline struct drgn_type_parameter *drgn_type_parameters(struct drgn_type *type)
-{
-	assert(drgn_type_has_parameters(type));
-	return type->_private.parameters;
-}
-/**
- * Get the number of parameters of a type. @ref drgn_type_has_parameters() must
- * be true for this type.
- */
-static inline size_t drgn_type_num_parameters(struct drgn_type *type)
-{
-	assert(drgn_type_has_parameters(type));
-	return type->_private.num_parameters;
-}
-
-/**
- * Get whether a kind of type can be variadic. This is true for function types.
- */
-static inline bool drgn_type_kind_has_is_variadic(enum drgn_type_kind kind)
-{
-	return kind == DRGN_TYPE_FUNCTION;
-}
-/** Get whether a type can be variadic. @sa drgn_type_kind_has_is_variadic() */
-static inline bool drgn_type_has_is_variadic(struct drgn_type *type)
-{
-	return drgn_type_kind_has_is_variadic(drgn_type_kind(type));
-}
-/**
- * Get whether a type is variadic. @ref drgn_type_has_is_variadic() must be true
- * for this type.
- */
-static inline bool drgn_type_is_variadic(struct drgn_type *type)
-{
-	assert(drgn_type_has_is_variadic(type));
-	return type->_private.is_variadic;
-}
-
-/**
- * Evaluate the type of a @ref drgn_type_member.
- *
- * @param[in] member Member.
- * @param[out] ret Returned type.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *drgn_member_type(struct drgn_type_member *member,
-				    struct drgn_qualified_type *ret);
-
-/**
- * Evaluate the type of a @ref drgn_type_parameter.
- *
- * @param[in] parameter Parameter.
- * @param[out] ret Returned type.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *drgn_parameter_type(struct drgn_type_parameter *parameter,
-				       struct drgn_qualified_type *ret);
-
-/**
- * Get the size of a type in bytes.
- *
- * Unlike @ref drgn_type_size(), this is applicable to any type which has a
- * meaningful size, including typedefs and arrays. Void, function, and
- * incomplete types do not have a size; an error is returned for those types.
- *
- * @param[in] type Type.
- * @param[out] ret Returned size.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *drgn_type_sizeof(struct drgn_type *type,
-				    uint64_t *ret);
-
-/**
- * Compare two @ref drgn_type%s for equality.
- *
- * Two types are equal if all of their fields are equal, recursively.
- *
- * @param[in] a First type.
- * @param[in] b First type.
- * @param[out] ret @c true if the types are equal, @c false if they are not.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *drgn_type_eq(struct drgn_type *a, struct drgn_type *b,
-				bool *ret);
-
-/**
- * Compare two @ref drgn_qualified_type%s for equality.
- *
- * Two qualified types are equal if their unqualified types are equal and their
- * qualifiers are equal.
- *
- * @param[in] a First qualified type.
- * @param[in] b First qualified type.
- * @param[out] ret @c true if the qualified types are equal, @c false if they
- * are not.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *drgn_qualified_type_eq(struct drgn_qualified_type a,
-					  struct drgn_qualified_type b,
-					  bool *ret);
-
-/**
- * Format the name of a type as a string.
- *
- * This will format the name of the type as it would be referred to in its
- * programming language.
- *
- * @param[in] qualified_type Type to format.
- * @param[out] ret Returned string. On success, it must be freed with @c free().
- * On error, its contents are undefined.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *
-drgn_format_type_name(struct drgn_qualified_type qualified_type, char **ret);
-
-/**
- * Format the definition of a type as a string.
- *
- * This will format the type as it would be defined in its programming language.
- *
- * @param[in] qualified_type Type to format.
- * @param[out] ret Returned string. On success, it must be freed with @c free().
- * On error, its contents are undefined.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *drgn_format_type(struct drgn_qualified_type qualified_type,
-				    char **ret);
-
-/** @} */
+drgn_type_language(struct drgn_type *type);
 
 /**
  * @defgroup Platforms Platforms
@@ -911,7 +342,7 @@ struct drgn_error *drgn_format_type(struct drgn_qualified_type qualified_type,
 enum drgn_architecture {
 	DRGN_ARCH_UNKNOWN,
 	DRGN_ARCH_X86_64,
-	DRGN_NUM_ARCH,
+	DRGN_ARCH_PPC64,
 };
 
 /** Flags describing a @ref drgn_platform. */
@@ -925,8 +356,6 @@ enum drgn_platform_flags {
 	/** Use the default flags for the architecture. */
 	DRGN_PLATFORM_DEFAULT_FLAGS = UINT_MAX,
 };
-
-@ENUM_DRGN_REGISTER_NUMBER@
 
 /**
  * @struct drgn_platform
@@ -961,12 +390,17 @@ enum drgn_architecture drgn_platform_arch(const struct drgn_platform *platform);
 enum drgn_platform_flags
 drgn_platform_flags(const struct drgn_platform *platform);
 
-/** Get the number of processor registers on a @ref drgn_platform. */
+/** Get the number of @ref drgn_register's on a @ref drgn_platform. */
 size_t drgn_platform_num_registers(const struct drgn_platform *platform);
 
-/** Get the @p n-th register of a @ref drgn_platform. */
+/** Get the @p n-th @ref drgn_register of a @ref drgn_platform. */
 const struct drgn_register *
 drgn_platform_register(const struct drgn_platform *platform, size_t n);
+
+/** Get a @ref drgn_register in a @ref drgn_platform by its name. */
+const struct drgn_register *
+drgn_platform_register_by_name(const struct drgn_platform *platform,
+			       const char *name);
 
 /** Return whether two platforms are identical. */
 bool drgn_platform_eq(struct drgn_platform *a, struct drgn_platform *b);
@@ -974,11 +408,14 @@ bool drgn_platform_eq(struct drgn_platform *a, struct drgn_platform *b);
 /** Platform that drgn was compiled for. */
 extern const struct drgn_platform drgn_host_platform;
 
-/** Get the name of a @ref drgn_register. */
-const char *drgn_register_name(const struct drgn_register *reg);
-
-/** Get the number of a @ref drgn_register. */
-enum drgn_register_number drgn_register_number(const struct drgn_register *reg);
+/**
+ * Get the names of a @ref drgn_register.
+ *
+ * @param[out] num_names_ret Returned number of names.
+ * @return Array of names.
+ */
+const char * const *drgn_register_names(const struct drgn_register *reg,
+					size_t *num_names_ret);
 
 /** @} */
 
@@ -1404,48 +841,6 @@ struct drgn_error *drgn_program_element_info(struct drgn_program *prog,
 					     struct drgn_type *type,
 					     struct drgn_element_info *ret);
 
-/**
- * Type, offset, and bit field size of an object member.
- *
- * @sa drgn_type_member
- */
-struct drgn_member_info {
-	/** Type of the member. */
-	struct drgn_qualified_type qualified_type;
-	/**
-	 * Offset in bits from the beginning of the type to the beginning of the
-	 * member.
-	 *
-	 * If the member was found inside an unnamed member of the enclosing
-	 * type, this is the offset from the beginning of the type passed to
-	 * @ref drgn_program_member_info().
-	 *
-	 * See @ref drgn_type_member::bit_offset.
-	 */
-	uint64_t bit_offset;
-	/** See @ref drgn_type_member::bit_field_size. */
-	uint64_t bit_field_size;
-};
-
-/**
- * Get the type, offset, and bit field size of a member of a @ref drgn_type by
- * name.
- *
- * If the type has any unnamed members, this also matches members of those
- * unnamed members, recursively.
- *
- * @param[in] prog Program.
- * @param[in] type Structure or union type. After this function is called, this
- * type must remain valid until the program is destroyed.
- * @param[in] member_name Name of member.
- * @param[out] ret Returned member information.
- * @return @c NULL on success, non-@c NULL on error.
- */
-struct drgn_error *drgn_program_member_info(struct drgn_program *prog,
-					    struct drgn_type *type,
-					    const char *member_name,
-					    struct drgn_member_info *ret);
-
 /** @} */
 
 /**
@@ -1481,161 +876,137 @@ struct drgn_error *drgn_program_member_info(struct drgn_program *prog,
  * @{
  */
 
-/**
- * Kinds of objects.
- *
- * The value of a @ref drgn_object falls into one of a handful of categories.
- * This kind determines which field of a @ref drgn_value is used.
- *
- * The incomplete kinds (@ref drgn_object_kind::DRGN_OBJECT_NONE, @ref
- * drgn_object_kind::DRGN_OBJECT_INCOMPLETE_BUFFER, and @ref
- * drgn_object_kind::DRGN_OBJECT_INCOMPLETE_INTEGER) are only possible for
- * reference objects; values have a complete type.
- */
+/** Kinds of objects. */
 enum drgn_object_kind {
+	/** Constant or temporary computed value. */
+	DRGN_OBJECT_VALUE,
+	/** In program memory. */
+	DRGN_OBJECT_REFERENCE,
+	/** Absent (e.g. optimized out). */
+	DRGN_OBJECT_ABSENT,
+} __attribute__((__packed__));
+
+/**
+ * Object encodings.
+ *
+ * The value of a @ref drgn_object may be encoded in various ways depending on
+ * its type. This determines which field of a @ref drgn_value is used.
+ *
+ * The incomplete encodings are only possible for reference objects; values have
+ * a complete type.
+ */
+enum drgn_object_encoding {
 	/**
 	 * Memory buffer.
 	 *
-	 * This is used for objects with a complex, structure, union, class, or
-	 * array type. The value is a buffer of the contents of that object's
-	 * memory in the program.
+	 * This is used for objects with a structure, union, class, or array
+	 * type. The value is a buffer of the contents of that object's memory
+	 * in the program.
 	 */
-	DRGN_OBJECT_BUFFER,
+	DRGN_OBJECT_ENCODING_BUFFER,
 	/**
 	 * Signed integer.
 	 *
 	 * This is used for objects with a signed integer or signed enumerated
 	 * type.
 	 */
-	DRGN_OBJECT_SIGNED,
+	DRGN_OBJECT_ENCODING_SIGNED,
 	/**
 	 * Unsigned integer.
 	 *
 	 * This is used for objects with a unsigned integer, boolean, or pointer
 	 * type.
 	 */
-	DRGN_OBJECT_UNSIGNED,
+	DRGN_OBJECT_ENCODING_UNSIGNED,
 	/**
 	 * Floating-point value.
 	 *
 	 * This used for objects with a floating-point type.
 	 */
-	DRGN_OBJECT_FLOAT,
+	DRGN_OBJECT_ENCODING_FLOAT,
 	/**
 	 * No value.
 	 *
 	 * This is used for reference objects with a void or function type.
 	 */
-	DRGN_OBJECT_NONE = -1,
+	DRGN_OBJECT_ENCODING_NONE = -1,
 	/**
 	 * Incomplete buffer value.
 	 *
 	 * This is used for reference objects with an incomplete structure,
 	 * union, class, or array type.
 	 */
-	DRGN_OBJECT_INCOMPLETE_BUFFER = -2,
+	DRGN_OBJECT_ENCODING_INCOMPLETE_BUFFER = -2,
 	/**
 	 * Incomplete integer value.
 	 *
 	 * This is used for reference objects with an incomplete enumerated
 	 * types.
 	 */
-	DRGN_OBJECT_INCOMPLETE_INTEGER = -3,
-} __attribute__((packed));
+	DRGN_OBJECT_ENCODING_INCOMPLETE_INTEGER = -3,
+} __attribute__((__packed__));
 
 /**
- * Return whether a type corresponding to a kind of object is complete.
+ * Return whether a type corresponding to an object encoding is complete.
  *
  * @sa drgn_type_is_complete()
  */
-static inline bool drgn_object_kind_is_complete(enum drgn_object_kind kind)
+static inline bool
+drgn_object_encoding_is_complete(enum drgn_object_encoding encoding)
 {
-	return kind >= DRGN_OBJECT_BUFFER;
+	return encoding >= 0;
 }
-
-/** Byte-order specification. */
-enum drgn_byte_order {
-	/** Big-endian. */
-	DRGN_BIG_ENDIAN,
-	/** Little-endian. */
-	DRGN_LITTLE_ENDIAN,
-	/** Endianness of the program. */
-	DRGN_PROGRAM_ENDIAN,
-};
 
 /** Value of a @ref drgn_object. */
 union drgn_value {
-	/** @ref drgn_object_kind::DRGN_OBJECT_BUFFER value. */
-	struct {
-		/** Buffer itself. */
-		union {
-			/** Pointer to an external buffer. */
-			char *bufp;
-			/**
-			 * Inline buffer.
-			 *
-			 * Tiny buffers (see @ref drgn_value_is_inline()) are
-			 * stored inline here instead of in a separate
-			 * allocation.
-			 */
-			char ibuf[8];
-		};
-		/**
-		 * Offset of the value from the beginning of the buffer.
-		 *
-		 * This is always less than 8, but usually 0.
-		 */
-		uint8_t bit_offset;
-		/** Whether the values within the buffer are little-endian. */
-		bool little_endian;
-	};
-	/** @ref drgn_object_kind::DRGN_OBJECT_SIGNED value. */
+	/**
+	 * Pointer to an external buffer for a @ref
+	 * drgn_object_encoding::DRGN_OBJECT_ENCODING_BUFFER value.
+	 */
+	char *bufp;
+	/**
+	 * Inline buffer for a @ref
+	 * drgn_object_encoding::DRGN_OBJECT_ENCODING_BUFFER value.
+	 *
+	 * Tiny buffers (see @ref drgn_value_is_inline()) are stored inline here
+	 * instead of in a separate allocation.
+	 */
+	char ibuf[8];
+	/** @ref drgn_object_encoding::DRGN_OBJECT_ENCODING_SIGNED value. */
 	int64_t svalue;
-	/** @ref drgn_object_kind::DRGN_OBJECT_UNSIGNED value. */
+	/** @ref drgn_object_encoding::DRGN_OBJECT_ENCODING_UNSIGNED value. */
 	uint64_t uvalue;
-	/** @ref drgn_object_kind::DRGN_OBJECT_FLOAT value. */
+	/** @ref drgn_object_encoding::DRGN_OBJECT_ENCODING_FLOAT value. */
 	double fvalue;
 };
 
 /**
- * Return the number of bytes needed to store a given number of bits starting at
- * a given offset.
+ * Return the number of bytes needed to store the given number of bits.
  *
- * This assumes that <tt>bit_size + bit_offset</tt> does not overflow a 64-bit
- * integer, which is guaranteed to be true for object values.
- *
- * @param[in] bit_size Size in bits of the value.
- * @param[in] bit_offset Offset of the value from the beginning of the buffer.
+ * @param[in] bits Number of bits.
  */
-static inline uint64_t drgn_value_size(uint64_t bit_size, uint64_t bit_offset)
+static inline uint64_t drgn_value_size(uint64_t bits)
 {
-	uint64_t bits = bit_size + bit_offset;
-
-	return bits / 8 + (bits % 8 ? 1 : 0);
+	return bits / CHAR_BIT + (bits % CHAR_BIT ? 1 : 0);
 }
 
 /**
- * Return whether a buffer value uses the inline buffer (@ref drgn_value::ibuf).
+ * Return whether the given number of bits can be stored in the inline buffer of
+ * a @ref drgn_value (@ref drgn_value::ibuf).
  *
- * This assumes that <tt>bit_size + bit_offset</tt> does not overflow a 64-bit
- * integer, which is guaranteed to be true for object values.
- *
- * @param[in] bit_size Size in bits of the value.
- * @param[in] bit_offset Offset of the value from the beginning of the buffer.
+ * @param[in] bits Number of bits.
  */
-static inline bool drgn_value_is_inline(uint64_t bit_size, uint64_t bit_offset)
+static inline bool drgn_value_is_inline(uint64_t bits)
 {
-	uint64_t bits = bit_size + bit_offset;
-
-	return bits <= 8 * sizeof(((union drgn_value *)0)->ibuf);
+	return bits <= CHAR_BIT * sizeof(((union drgn_value *)0)->ibuf);
 }
 
 /**
  * Object in a program.
  *
  * A @ref drgn_object represents a symbol or value in a program. It can be in
- * the memory of the program (a "reference") or a temporary computed value (a
- * "value").
+ * the memory of the program (a "reference"), a temporary computed value (a
+ * "value"), or "absent".
  *
  * A @ref drgn_object must be initialized with @ref drgn_object_init() before it
  * is used. It can then be set and otherwise changed repeatedly. When the object
@@ -1659,58 +1030,55 @@ struct drgn_object {
 	uint64_t bit_size;
 	/** Qualifiers on @ref drgn_object::type. */
 	enum drgn_qualifiers qualifiers;
+	/** How this object is encoded. */
+	enum drgn_object_encoding encoding;
 	/** Kind of this object. */
 	enum drgn_object_kind kind;
-	/** Whether this object is a reference. */
-	bool is_reference;
 	/** Whether this object is a bit field. */
 	bool is_bit_field;
+	/**
+	 * Whether this object is little-endian.
+	 *
+	 * Valid only for scalars (i.e., @ref
+	 * drgn_object_encoding::DRGN_OBJECT_ENCODING_SIGNED, @ref
+	 * drgn_object_encoding::DRGN_OBJECT_ENCODING_UNSIGNED, @ref
+	 * drgn_object_encoding::DRGN_OBJECT_ENCODING_FLOAT, or @ref
+	 * drgn_object_encoding::DRGN_OBJECT_ENCODING_INCOMPLETE_INTEGER).
+	 */
+	bool little_endian;
+	/**
+	 * Offset in bits from @c address.
+	 *
+	 * Valid only for reference objects.
+	 */
+	uint8_t bit_offset;
 	union {
-		/** Value. */
+		/** Value of value object. */
 		union drgn_value value;
-		/** Reference. */
-		struct {
-			/** Address in the program. */
-			uint64_t address;
-			/**
-			 * Offset in bits from @c reference.
-			 *
-			 * This is always less than 8, but usually 0.
-			 */
-			uint8_t bit_offset;
-			/** Whether the referenced object is little-endian. */
-			bool little_endian;
-		} reference;
+		/** Address of reference object. */
+		uint64_t address;
 	};
 };
 
-/** Return the size of a buffer object in bytes. */
-static inline uint64_t drgn_buffer_object_size(const struct drgn_object *obj)
+/** Return the number of bytes needed to store an object's value. */
+static inline uint64_t drgn_object_size(const struct drgn_object *obj)
 {
-	return drgn_value_size(obj->bit_size, obj->value.bit_offset);
-}
-
-/** Return the referenced size of a reference object in bytes. */
-static inline uint64_t drgn_reference_object_size(const struct drgn_object *obj)
-{
-	return drgn_value_size(obj->bit_size, obj->reference.bit_offset);
+	return drgn_value_size(obj->bit_size);
 }
 
 /**
- * Return whether an object's value uses the inline buffer (@ref
- * drgn_value::ibuf).
+ * Return whether an object's value can be stored in the inline buffer of a @ref
+ * drgn_value (@ref drgn_value::ibuf).
  */
-static inline bool drgn_buffer_object_is_inline(const struct drgn_object *obj)
+static inline bool drgn_object_is_inline(const struct drgn_object *obj)
 {
-	return drgn_value_is_inline(obj->bit_size, obj->value.bit_offset);
+	return drgn_value_is_inline(obj->bit_size);
 }
 
 /** Return an object's buffer. */
-#define drgn_object_buffer(obj) ({					\
-	__auto_type _obj = (obj);					\
-									\
-	(drgn_buffer_object_is_inline(_obj) ? _obj->value.ibuf :	\
-	 _obj->value.bufp);						\
+#define drgn_object_buffer(obj) ({						\
+	__auto_type _obj = (obj);						\
+	drgn_object_is_inline(_obj) ? _obj->value.ibuf : _obj->value.bufp;	\
 })
 
 /** Get the type of a @ref drgn_object. */
@@ -1812,27 +1180,27 @@ drgn_object_set_float(struct drgn_object *res,
 		      struct drgn_qualified_type qualified_type, double fvalue);
 
 /**
- * Set a @ref drgn_object to a buffer value.
+ * Set a @ref drgn_object from a buffer.
  *
  * @param[out] res Object to set.
  * @param[in] qualified_type Type to set to.
- * @param[in] buf Buffer to set to. It must be at least
- * <tt>bit_size + bit_offset</tt> bits large, where @c bit_size is @p
- * bit_field_size if non-zero and the size of @p qualified_type otherwise. It is
- * copied, so it need not remain valid after this function returns.
- * @param[in] bit_offset Offset of the value from the beginning of the buffer.
- * This must be less than 8 (and is usually 0).
+ * @param[in] buf Buffer to set to. It is copied, so it need not remain valid
+ * after this function returns.
+ * @param[in] buf_size Size of @p buf, in bytes. `buf_size * 8` must be at least
+ * `bit_size + bit_offset`, where @c bit_size is @p bit_field_size if non-zero
+ * and the size of @p qualified_type in bits otherwise.
+ * @param[in] bit_offset Offset of the value from the beginning of the buffer,
+ * in bits. This is usually 0. It must be aligned to a byte unless the type is
+ * scalar.
  * @param[in] bit_field_size If the object should be a bit field, its size in
  * bits. Otherwise, 0.
- * @param[in] byte_order Byte order of the result.
  * @return @c NULL on success, non-@c NULL on error.
  */
 struct drgn_error *
-drgn_object_set_buffer(struct drgn_object *res,
-		       struct drgn_qualified_type qualified_type,
-		       const void *buf, uint8_t bit_offset,
-		       uint64_t bit_field_size,
-		       enum drgn_byte_order byte_order);
+drgn_object_set_from_buffer(struct drgn_object *res,
+			    struct drgn_qualified_type qualified_type,
+			    const void *buf, size_t buf_size,
+			    uint64_t bit_offset, uint64_t bit_field_size);
 
 /**
  * Set a @ref drgn_object to a reference.
@@ -1840,19 +1208,31 @@ drgn_object_set_buffer(struct drgn_object *res,
  * @param[out] res Object to set.
  * @param[in] qualified_type Type to set to.
  * @param[in] address Address of the object.
- * @param[in] bit_offset Offset of the value from @p address. This may be
- * greater than or equal to 8.
+ * @param[in] bit_offset Offset of the value from @p address, in bits. This is
+ * usually 0.
  * @param[in] bit_field_size If the object should be a bit field, its size in
  * bits. Otherwise, 0.
- * @param[in] byte_order Byte order of the result.
  * @return @c NULL on success, non-@c NULL on error.
  */
 struct drgn_error *
 drgn_object_set_reference(struct drgn_object *res,
 			  struct drgn_qualified_type qualified_type,
 			  uint64_t address, uint64_t bit_offset,
-			  uint64_t bit_field_size,
-			  enum drgn_byte_order byte_order);
+			  uint64_t bit_field_size);
+
+/**
+ * Set a @ref drgn_object as absent.
+ *
+ * @param[out] res Object to set.
+ * @param[in] qualified_type Type to set to.
+ * @param[in] bit_field_size If the object should be a bit field, its size in
+ * bits. Otherwise, 0.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *
+drgn_object_set_absent(struct drgn_object *res,
+		       struct drgn_qualified_type qualified_type,
+		       uint64_t bit_field_size);
 
 /**
  * Set a @ref drgn_object to a integer literal.
@@ -1925,7 +1305,8 @@ struct drgn_error *drgn_object_copy(struct drgn_object *res,
 				    const struct drgn_object *obj);
 
 /**
- * Get a @ref drgn_object from a slice of a @ref DRGN_OBJECT_BUFFER object.
+ * Get a @ref drgn_object from a slice of a @ref DRGN_OBJECT_ENCODING_BUFFER
+ * object.
  *
  * This is a low-level interface used to implement @ref drgn_object_subscript()
  * and @ref drgn_object_member(). Those functions are usually more convenient.
@@ -1936,10 +1317,10 @@ struct drgn_error *drgn_object_copy(struct drgn_object *res,
  * offset for each element.
  *
  * If the same member of a type is accessed repeatedly (e.g., in a loop), it can
- * be more efficient to call @ref drgn_program_member_info() once to get the
+ * be more efficient to call @ref drgn_type_find_member() once to get the
  * required information and this function to access the member each time.
  *
- * @sa drgn_object_pointer_offset
+ * @sa drgn_object_dereference_offset
  *
  * @param[out] res Destination object.
  * @param[in] obj Source object.
@@ -2022,8 +1403,8 @@ void drgn_object_deinit_value(const struct drgn_object *obj,
 			      const union drgn_value *value);
 
 /**
- * Get the value of an object with kind @ref
- * drgn_object_kind::DRGN_OBJECT_SIGNED.
+ * Get the value of an object encoded with @ref
+ * drgn_object_encoding::DRGN_OBJECT_ENCODING_SIGNED.
  *
  * If the object is not a signed integer, an error is returned.
  *
@@ -2035,8 +1416,8 @@ struct drgn_error *drgn_object_read_signed(const struct drgn_object *obj,
 					   int64_t *ret);
 
 /**
- * Get the value of an object with kind @ref
- * drgn_object_kind::DRGN_OBJECT_UNSIGNED.
+ * Get the value of an object encoded with @ref
+ * drgn_object_encoding::DRGN_OBJECT_ENCODING_UNSIGNED.
  *
  * If the object is not an unsigned integer, an error is returned.
  *
@@ -2048,9 +1429,9 @@ struct drgn_error *drgn_object_read_unsigned(const struct drgn_object *obj,
 					     uint64_t *ret);
 
 /**
- * Get the value of an object with kind @ref
- * drgn_object_kind::DRGN_OBJECT_SIGNED or @ref
- * drgn_object_kind::DRGN_OBJECT_UNSIGNED.
+ * Get the value of an object encoded with @ref
+ * drgn_object_encoding::DRGN_OBJECT_ENCODING_SIGNED or @ref
+ * drgn_object_encoding::DRGN_OBJECT_ENCODING_UNSIGNED.
  *
  * If the object is not an integer, an error is returned.
  *
@@ -2062,8 +1443,8 @@ struct drgn_error *drgn_object_read_integer(const struct drgn_object *obj,
 					    union drgn_value *ret);
 
 /**
- * Get the value of an object with kind @ref
- * drgn_object_kind::DRGN_OBJECT_FLOAT.
+ * Get the value of an object encoded with @ref
+ * drgn_object_encoding::DRGN_OBJECT_ENCODING_FLOAT.
  *
  * If the object does not have a floating-point type, an error is returned.
  *
@@ -2197,7 +1578,6 @@ struct drgn_error *drgn_object_cast(struct drgn_object *res,
 struct drgn_error *
 drgn_object_reinterpret(struct drgn_object *res,
 			struct drgn_qualified_type qualified_type,
-			enum drgn_byte_order byte_order,
 			const struct drgn_object *obj);
 
 /**
@@ -2391,6 +1771,782 @@ struct drgn_error *drgn_object_sizeof(const struct drgn_object *obj,
 /** @} */
 
 /**
+ * @ingroup LazyObjects
+ *
+ * Callback to evaluate and/or free a @ref drgn_lazy_object.
+ *
+ * If @p res is not @c NULL, then this should return the object in @p res and
+ * free @p arg if necessary. If this returns an error, it may be called again
+ * (so @p arg must remain valid).
+ *
+ * If @p res is @c NULL, then this should free @p arg if necessary; it must not
+ * return an error.
+ *
+ * @param[out] res Result object (if evaluating) or @c NULL (if freeing). This
+ * is already initialized and should not be deinitialized on error.
+ * @param[in] arg Callback argument passed to @ref
+ * drgn_lazy_object_init_thunk().
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+typedef struct drgn_error *drgn_object_thunk_fn(struct drgn_object *res,
+						void *arg);
+
+/**
+ * @ingroup LazyObjects
+ *
+ * Lazily-evaluated object.
+ *
+ * A lazy object may be in two states: unevaluated, in which case a callback
+ * must be called to evaluate the object, or evaluated, in which case the object
+ * is cached. To evaluate an object, the callback is called, and the result is
+ * cached.
+ *
+ * This is for internal use only.
+ */
+union drgn_lazy_object {
+	/** Object if it has already been evaluated. */
+	struct drgn_object obj;
+	/** Thunk if the object has not been evaluated yet. */
+	struct {
+		/**
+		 * Always @c NULL to indicate an unevaluated lazy object.
+		 *
+		 * This must be at the same offset as @ref drgn_object::type.
+		 */
+		struct drgn_type *dummy_type;
+		/** Program owning this thunk. */
+		struct drgn_program *prog;
+		/** Callback. */
+		drgn_object_thunk_fn *fn;
+		/** Argument passed to @ref drgn_lazy_object::thunk::fn. */
+		void *arg;
+	} thunk;
+};
+
+/**
+ * @defgroup Types Types
+ *
+ * Type descriptors.
+ *
+ * Types in a program are represented by @ref drgn_type.
+ *
+ * Type descriptors have various fields depending on the kind of type. For each
+ * field @c foo, there is a @c drgn_type_kind_has_foo() helper which returns
+ * whether the given kind of type has the field @c foo; a @c drgn_type_has_foo()
+ * helper which does the same but takes a type; and a @c drgn_type_foo() helper
+ * which returns the field. For members, enumerators, and parameters, there is
+ * also a @c drgn_type_num_foo() helper.
+ *
+ * @{
+ */
+
+/** Primitive types known to drgn. */
+enum drgn_primitive_type {
+	/* Primitive C types. */
+	DRGN_C_TYPE_VOID,
+	DRGN_C_TYPE_CHAR,
+	DRGN_C_TYPE_SIGNED_CHAR,
+	DRGN_C_TYPE_UNSIGNED_CHAR,
+	DRGN_C_TYPE_SHORT,
+	DRGN_C_TYPE_UNSIGNED_SHORT,
+	DRGN_C_TYPE_INT,
+	DRGN_C_TYPE_UNSIGNED_INT,
+	DRGN_C_TYPE_LONG,
+	DRGN_C_TYPE_UNSIGNED_LONG,
+	DRGN_C_TYPE_LONG_LONG,
+	DRGN_C_TYPE_UNSIGNED_LONG_LONG,
+	DRGN_C_TYPE_BOOL,
+	DRGN_C_TYPE_FLOAT,
+	DRGN_C_TYPE_DOUBLE,
+	DRGN_C_TYPE_LONG_DOUBLE,
+	DRGN_C_TYPE_SIZE_T,
+	DRGN_C_TYPE_PTRDIFF_T,
+	DRGN_PRIMITIVE_TYPE_NUM,
+	DRGN_NOT_PRIMITIVE_TYPE = DRGN_PRIMITIVE_TYPE_NUM,
+	/*
+	 * Make sure to update api_reference.rst and type.c when adding anything
+	 * here.
+	 */
+} __attribute__((__packed__));
+
+/** Member of a structure, union, or class type. */
+struct drgn_type_member {
+	/**
+	 * Member as an object.
+	 *
+	 * Access this with @ref drgn_member_object() or @ref
+	 * drgn_member_type().
+	 */
+	union drgn_lazy_object object;
+	/** Member name or @c NULL if it is unnamed. */
+	const char *name;
+	/**
+	 * Offset in bits from the beginning of the type to the beginning of
+	 * this member (i.e., for little-endian machines, the least significant
+	 * bit, and for big-endian machines, the most significant bit). Members
+	 * are usually aligned to at least a byte, so this is usually a multiple
+	 * of 8 (but that may not be the case for bit fields).
+	 */
+	uint64_t bit_offset;
+};
+
+/** Value of an enumerated type. */
+struct drgn_type_enumerator {
+	/** Enumerator name. */
+	const char *name;
+	union {
+		/** Enumerator value if the type is signed. */
+		int64_t svalue;
+		/** Enumerator value if the type is unsigned. */
+		uint64_t uvalue;
+	};
+};
+
+/** Parameter of a function type. */
+struct drgn_type_parameter {
+	/**
+	 * Parameter type and default argument.
+	 *
+	 * Access this with @ref drgn_parameter_default_argument() or @ref
+	 * drgn_parameter_type().
+	 */
+	union drgn_lazy_object default_argument;
+	/** Parameter name or @c NULL if it is unnamed. */
+	const char *name;
+};
+
+/** Template parameter of a structure, union, class, or function type. */
+struct drgn_type_template_parameter {
+	/**
+	 * Template parameter type or value.
+	 *
+	 * Access this with @ref drgn_template_parameter_type() and @ref
+	 * drgn_template_parameter_object().
+	 */
+	union drgn_lazy_object argument;
+	/** Template parameter name or @c NULL if it is unnamed. */
+	const char *name;
+	/** Whether the argument is the default. */
+	bool is_default;
+};
+
+/**
+ * Language-agnostic type descriptor.
+ *
+ * This structure should not be accessed directly; see @ref Types.
+ */
+struct drgn_type {
+	/** @privatesection */
+	struct {
+		enum drgn_type_kind kind;
+		bool is_complete;
+		enum drgn_primitive_type primitive;
+		/* These are the qualifiers for the wrapped type, not this type. */
+		enum drgn_qualifiers qualifiers;
+		struct drgn_program *program;
+		const struct drgn_language *language;
+		/*
+		 * This mess of unions is used to make this as compact as possible. Use
+		 * the provided helpers and don't think about it.
+		 */
+		union {
+			const char *name;
+			const char *tag;
+			size_t num_parameters;
+		};
+		union {
+			uint64_t size;
+			uint64_t length;
+			size_t num_enumerators;
+			bool is_variadic;
+		};
+		union {
+			bool is_signed;
+			size_t num_members;
+			struct drgn_type *type;
+		};
+		union {
+			bool little_endian;
+			struct drgn_type_member *members;
+			struct drgn_type_enumerator *enumerators;
+			struct drgn_type_parameter *parameters;
+		};
+		struct drgn_type_template_parameter *template_parameters;
+		size_t num_template_parameters;
+	} _private;
+};
+
+/** Get the kind of a type. */
+static inline enum drgn_type_kind drgn_type_kind(struct drgn_type *type)
+{
+	return type->_private.kind;
+}
+
+/** Get the primitive type corresponding to a @ref drgn_type. */
+static inline enum drgn_primitive_type
+drgn_type_primitive(struct drgn_type *type)
+{
+	return type->_private.primitive;
+}
+
+/**
+ * Get whether a type is complete (i.e., the type definition is known).
+ *
+ * This is always @c false for the void type. It may be @c false for structure,
+ * union, class, enumerated, and array types, as well as typedef types where the
+ * underlying type is one of those. Otherwise, it is always @c true.
+ */
+static inline bool drgn_type_is_complete(struct drgn_type *type)
+{
+	return type->_private.is_complete;
+}
+
+static inline struct drgn_program *
+drgn_type_program(struct drgn_type *type)
+{
+	return type->_private.program;
+}
+
+/** Get the language of a type. */
+static inline const struct drgn_language *
+drgn_type_language(struct drgn_type *type)
+{
+	return type->_private.language;
+}
+
+/**
+ * Get whether a kind of type has a name. This is true for integer, boolean,
+ * floating-point, and typedef types.
+ */
+static inline bool drgn_type_kind_has_name(enum drgn_type_kind kind)
+{
+	return (kind == DRGN_TYPE_INT ||
+		kind == DRGN_TYPE_BOOL ||
+		kind == DRGN_TYPE_FLOAT ||
+		kind == DRGN_TYPE_TYPEDEF);
+}
+/** Get whether a type has a name. @sa drgn_type_kind_has_name() */
+static inline bool drgn_type_has_name(struct drgn_type *type)
+{
+	return drgn_type_kind_has_name(drgn_type_kind(type));
+}
+/**
+ * Get the name of a type. @ref drgn_type_has_name() must be true for this type.
+ */
+static inline const char *drgn_type_name(struct drgn_type *type)
+{
+	assert(drgn_type_has_name(type));
+	return type->_private.name;
+}
+
+/**
+ * Get whether a kind of type has a size. This is true for integer, boolean,
+ * floating-point, structure, union, class, and pointer types.
+ */
+static inline bool drgn_type_kind_has_size(enum drgn_type_kind kind)
+{
+	return (kind == DRGN_TYPE_INT ||
+		kind == DRGN_TYPE_BOOL ||
+		kind == DRGN_TYPE_FLOAT ||
+		kind == DRGN_TYPE_STRUCT ||
+		kind == DRGN_TYPE_UNION ||
+		kind == DRGN_TYPE_CLASS ||
+		kind == DRGN_TYPE_POINTER);
+}
+/** Get whether a type has a size. @sa drgn_type_kind_has_size() */
+static inline bool drgn_type_has_size(struct drgn_type *type)
+{
+	return drgn_type_kind_has_size(drgn_type_kind(type));
+}
+/**
+ * Get the size of a type in bytes. @ref drgn_type_has_size() must be true for
+ * this type.
+ */
+static inline uint64_t drgn_type_size(struct drgn_type *type)
+{
+	assert(drgn_type_has_size(type));
+	return type->_private.size;
+}
+
+/**
+ * Get whether a kind of type has a signedness. This is true for integer types.
+ */
+static inline bool drgn_type_kind_has_is_signed(enum drgn_type_kind kind)
+{
+	return kind == DRGN_TYPE_INT;
+}
+/** Get whether a type has a signedness. @sa drgn_type_kind_has_is_signed() */
+static inline bool drgn_type_has_is_signed(struct drgn_type *type)
+{
+	return drgn_type_kind_has_is_signed(drgn_type_kind(type));
+}
+/**
+ * Get the signedness of a type. @ref drgn_type_has_is_signed() must be true for
+ * this type.
+ */
+static inline bool drgn_type_is_signed(struct drgn_type *type)
+{
+	assert(drgn_type_has_is_signed(type));
+	return type->_private.is_signed;
+}
+
+/**
+ * Get whether a kind of type has a byte order. This is true for integer,
+ * boolean, floating-point, and pointer types.
+ */
+static inline bool drgn_type_kind_has_little_endian(enum drgn_type_kind kind)
+{
+	return (kind == DRGN_TYPE_INT ||
+		kind == DRGN_TYPE_BOOL ||
+		kind == DRGN_TYPE_FLOAT ||
+		kind == DRGN_TYPE_POINTER);
+}
+/**
+ * Get whether a type has a byte order. @sa drgn_type_kind_has_little_endian()
+ */
+static inline bool drgn_type_has_little_endian(struct drgn_type *type)
+{
+	return drgn_type_kind_has_little_endian(drgn_type_kind(type));
+}
+/**
+ * Get the byte order of a type. @ref drgn_type_has_little_endian() must be true
+ * for this type.
+ *
+ * @return @c true if the type is little-endian, @c false if it is big-endian.
+ */
+static inline bool drgn_type_little_endian(struct drgn_type *type)
+{
+	assert(drgn_type_has_little_endian(type));
+	return type->_private.little_endian;
+}
+
+/**
+ * Get whether a kind of type has a tag. This is true for structure, union,
+ * class, and enumerated types.
+ */
+static inline bool drgn_type_kind_has_tag(enum drgn_type_kind kind)
+{
+	return (kind == DRGN_TYPE_STRUCT ||
+		kind == DRGN_TYPE_UNION ||
+		kind == DRGN_TYPE_CLASS ||
+		kind == DRGN_TYPE_ENUM);
+}
+/** Get whether a type has a tag. @sa drgn_type_kind_has_tag() */
+static inline bool drgn_type_has_tag(struct drgn_type *type)
+{
+	return drgn_type_kind_has_tag(drgn_type_kind(type));
+}
+/**
+ * Get the tag of a type. @ref drgn_type_has_tag() must be true for this type.
+ */
+static inline const char *drgn_type_tag(struct drgn_type *type)
+{
+	assert(drgn_type_has_tag(type));
+	return type->_private.tag;
+}
+
+/**
+ * Get whether a kind of type has members. This is true for structure, union,
+ * and class types.
+ */
+static inline bool drgn_type_kind_has_members(enum drgn_type_kind kind)
+{
+	return (kind == DRGN_TYPE_STRUCT ||
+		kind == DRGN_TYPE_UNION ||
+		kind == DRGN_TYPE_CLASS);
+}
+/** Get whether a type has members. @sa drgn_type_kind_has_members() */
+static inline bool drgn_type_has_members(struct drgn_type *type)
+{
+	return drgn_type_kind_has_members(drgn_type_kind(type));
+}
+/**
+ * Get the members of a type. @ref drgn_type_has_members() must be true for this
+ * type.
+ */
+static inline struct drgn_type_member *drgn_type_members(struct drgn_type *type)
+{
+	assert(drgn_type_has_members(type));
+	return type->_private.members;
+}
+/**
+ * Get the number of members of a type. @ref drgn_type_has_members() must be
+ * true for this type. If the type is incomplete, this is always zero.
+ */
+static inline size_t drgn_type_num_members(struct drgn_type *type)
+{
+	assert(drgn_type_has_members(type));
+	return type->_private.num_members;
+}
+
+/**
+ * Get whether a kind of type has a wrapped type. This is true for enumerated,
+ * typedef, pointer, array, and function types.
+ */
+static inline bool drgn_type_kind_has_type(enum drgn_type_kind kind)
+{
+	return (kind == DRGN_TYPE_ENUM ||
+		kind == DRGN_TYPE_TYPEDEF ||
+		kind == DRGN_TYPE_POINTER ||
+		kind == DRGN_TYPE_ARRAY ||
+		kind == DRGN_TYPE_FUNCTION);
+}
+/** Get whether a type has a wrapped type. @sa drgn_type_kind_has_type() */
+static inline bool drgn_type_has_type(struct drgn_type *type)
+{
+	return drgn_type_kind_has_type(drgn_type_kind(type));
+}
+/**
+ * Get the type wrapped by this type.
+ *
+ * For an enumerated type, this is the compatible integer type. It is @c NULL if
+ * the enumerated type is incomplete.
+ *
+ * For a typedef type, this is the aliased type.
+ *
+ * For a pointer type, this is the referenced type.
+ *
+ * For an array type, this is the element type.
+ *
+ * For a function type, this is the return type.
+ */
+static inline struct drgn_qualified_type
+drgn_type_type(struct drgn_type *type)
+{
+	assert(drgn_type_has_type(type));
+	return (struct drgn_qualified_type){
+		.type = type->_private.type,
+		.qualifiers = type->_private.qualifiers,
+	};
+}
+
+/**
+ * Get whether a kind of type has enumerators. This is true for enumerated
+ * types.
+ */
+static inline bool drgn_type_kind_has_enumerators(enum drgn_type_kind kind)
+{
+	return kind == DRGN_TYPE_ENUM;
+}
+/** Get whether a type has enumerators. @sa drgn_type_kind_has_enumerators() */
+static inline bool drgn_type_has_enumerators(struct drgn_type *type)
+{
+	return drgn_type_kind_has_enumerators(drgn_type_kind(type));
+}
+/**
+ * Get the enumerators of a type. @ref drgn_type_has_enumerators() must be true
+ * for this type.
+ */
+static inline struct drgn_type_enumerator *
+drgn_type_enumerators(struct drgn_type *type)
+{
+	assert(drgn_type_has_enumerators(type));
+	return type->_private.enumerators;
+}
+/**
+ * Get the number of enumerators of a type. @ref drgn_type_has_enumerators()
+ * must be true for this type. If the type is incomplete, this is always zero.
+ */
+static inline size_t drgn_type_num_enumerators(struct drgn_type *type)
+{
+	assert(drgn_type_has_enumerators(type));
+	return type->_private.num_enumerators;
+}
+
+/** Get whether a kind of type has a length. This is true for array types. */
+static inline bool drgn_type_kind_has_length(enum drgn_type_kind kind)
+{
+	return kind == DRGN_TYPE_ARRAY;
+}
+/** Get whether a type has a length. @sa drgn_type_kind_has_length() */
+static inline bool drgn_type_has_length(struct drgn_type *type)
+{
+	return drgn_type_kind_has_length(drgn_type_kind(type));
+}
+/**
+ * Get the length of a type. @ref drgn_type_has_length() must be true for this
+ * type. If the type is incomplete, this is always zero.
+ */
+static inline uint64_t drgn_type_length(struct drgn_type *type)
+{
+	assert(drgn_type_has_length(type));
+	return type->_private.length;
+}
+
+/**
+ * Get whether a kind of type has parameters. This is true for function types.
+ */
+static inline bool drgn_type_kind_has_parameters(enum drgn_type_kind kind)
+{
+	return kind == DRGN_TYPE_FUNCTION;
+}
+/** Get whether a type has parameters. @sa drgn_type_kind_has_parameters() */
+static inline bool drgn_type_has_parameters(struct drgn_type *type)
+{
+	return drgn_type_kind_has_parameters(drgn_type_kind(type));
+}
+/**
+ * Get the parameters of a type. @ref drgn_type_has_parameters() must be true
+ * for this type.
+ */
+static inline struct drgn_type_parameter *drgn_type_parameters(struct drgn_type *type)
+{
+	assert(drgn_type_has_parameters(type));
+	return type->_private.parameters;
+}
+/**
+ * Get the number of parameters of a type. @ref drgn_type_has_parameters() must
+ * be true for this type.
+ */
+static inline size_t drgn_type_num_parameters(struct drgn_type *type)
+{
+	assert(drgn_type_has_parameters(type));
+	return type->_private.num_parameters;
+}
+
+/**
+ * Get whether a kind of type can be variadic. This is true for function types.
+ */
+static inline bool drgn_type_kind_has_is_variadic(enum drgn_type_kind kind)
+{
+	return kind == DRGN_TYPE_FUNCTION;
+}
+/** Get whether a type can be variadic. @sa drgn_type_kind_has_is_variadic() */
+static inline bool drgn_type_has_is_variadic(struct drgn_type *type)
+{
+	return drgn_type_kind_has_is_variadic(drgn_type_kind(type));
+}
+/**
+ * Get whether a type is variadic. @ref drgn_type_has_is_variadic() must be true
+ * for this type.
+ */
+static inline bool drgn_type_is_variadic(struct drgn_type *type)
+{
+	assert(drgn_type_has_is_variadic(type));
+	return type->_private.is_variadic;
+}
+
+/** Get whether a kind of type can have template parameters. */
+static inline bool
+drgn_type_kind_has_template_parameters(enum drgn_type_kind kind)
+{
+	return (kind == DRGN_TYPE_STRUCT ||
+		kind == DRGN_TYPE_UNION ||
+		kind == DRGN_TYPE_CLASS ||
+		kind == DRGN_TYPE_FUNCTION);
+}
+
+/** Get whether a type can have template parameters. */
+static inline bool drgn_type_has_template_parameters(struct drgn_type *type)
+{
+	return drgn_type_kind_has_template_parameters(drgn_type_kind(type));
+}
+
+/**
+ * Get the template parameters of a type. @ref
+ * drgn_type_has_template_parameters() must be true for this type.
+ */
+static inline struct drgn_type_template_parameter *
+drgn_type_template_parameters(struct drgn_type *type)
+{
+	assert(drgn_type_has_template_parameters(type));
+	return type->_private.template_parameters;
+}
+
+/**
+ * Get the number of template parameters of a type. @ref
+ * drgn_type_has_template_parameters() must be true for this type.
+ */
+static inline size_t drgn_type_num_template_parameters(struct drgn_type *type)
+{
+	assert(drgn_type_has_template_parameters(type));
+	return type->_private.num_template_parameters;
+}
+
+/**
+ * Get the object corresponding to a @ref drgn_type_member.
+ *
+ * @param[in] member Member.
+ * @param[out] ret Returned object.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *drgn_member_object(struct drgn_type_member *member,
+				      const struct drgn_object **ret)
+	__attribute__((__nonnull__(1, 2)));
+
+/**
+ * Get the type of a @ref drgn_type_member.
+ *
+ * @param[in] member Member.
+ * @param[out] type_ret Returned type.
+ * @param[out] bit_field_size_ret If the member is a bit field, returned size of
+ * the field in bits. Otherwise, returned as 0. Can be @c NULL if not needed.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *drgn_member_type(struct drgn_type_member *member,
+				    struct drgn_qualified_type *type_ret,
+				    uint64_t *bit_field_size_ret)
+	__attribute__((__nonnull__(1, 2)));
+
+/**
+ * Get the default argument of a @ref drgn_type_parameter.
+ *
+ * @param[in] parameter Parameter.
+ * @param[out] ret Returned object.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *
+drgn_parameter_default_argument(struct drgn_type_parameter *parameter,
+				const struct drgn_object **ret)
+	__attribute__((__nonnull__(1, 2)));
+
+/**
+ * Get the type of a @ref drgn_type_parameter.
+ *
+ * @param[in] parameter Parameter.
+ * @param[out] ret Returned type.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *drgn_parameter_type(struct drgn_type_parameter *parameter,
+				       struct drgn_qualified_type *ret)
+	__attribute__((__nonnull__(1, 2)));
+
+/**
+ * Get the type of a @ref drgn_type_template_parameter.
+ *
+ * If the template parameter is a non-type template parameter, this is the type
+ * of its value.
+ *
+ * @param[in] parameter Template parameter.
+ * @param[out] ret Returned type.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *
+drgn_template_parameter_type(struct drgn_type_template_parameter *parameter,
+			     struct drgn_qualified_type *ret)
+	__attribute__((__nonnull__(1, 2)));
+
+/**
+ * Get the value of a @ref drgn_type_template_parameter.
+ *
+ * @param[in] parameter Template parameter.
+ * @param[out] ret Returned object. If @p parameter is a type template
+ * parameter, this is returned as @c NULL.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *
+drgn_template_parameter_object(struct drgn_type_template_parameter *parameter,
+			       const struct drgn_object **ret)
+	__attribute__((__nonnull__(1, 2)));
+
+/**
+ * Get the size of a type in bytes.
+ *
+ * Unlike @ref drgn_type_size(), this is applicable to any type which has a
+ * meaningful size, including typedefs and arrays. Void, function, and
+ * incomplete types do not have a size; an error is returned for those types.
+ *
+ * @param[in] type Type.
+ * @param[out] ret Returned size.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *drgn_type_sizeof(struct drgn_type *type, uint64_t *ret);
+
+/**
+ * Get the offset in bytes of a member from the start of a structure, union, or
+ * class type.
+ *
+ * This corresponds to @c offsetof() in C.
+ *
+ * @param[in] type Type which contains the member.
+ * @param[in] member_designator Name of the member in @p type. This can include
+ * one or more member references and zero or more array subscripts.
+ */
+struct drgn_error *drgn_type_offsetof(struct drgn_type *type,
+				      const char *member_designator,
+				      uint64_t *ret);
+
+/**
+ * Like @ref drgn_type_find_member(), but takes the length of @p member_name.
+ */
+struct drgn_error *
+drgn_type_find_member_len(struct drgn_type *type, const char *member_name,
+			  size_t member_name_len,
+			  struct drgn_type_member **member_ret,
+			  uint64_t *bit_offset_ret);
+
+/**
+ * Find a member in a @ref drgn_type by name.
+ *
+ * If the type has any unnamed members, this also matches members of those
+ * unnamed members, recursively.
+ *
+ * @param[in] type Structure, union, or class type.
+ * @param[in] member_name Name of member.
+ * @param[out] member_ret Returned member.
+ * @param[out] bit_offset_ret Returned offset in bits from the beginning of @p
+ * type to the beginning of the member. This can be different from @ref
+ * drgn_type_member::bit_offset if the returned member was found in an unnamed
+ * member of @p type.
+ */
+static inline struct drgn_error *
+drgn_type_find_member(struct drgn_type *type, const char *member_name,
+		      struct drgn_type_member **member_ret,
+		      uint64_t *bit_offset_ret)
+{
+	return drgn_type_find_member_len(type, member_name, strlen(member_name),
+					 member_ret, bit_offset_ret);
+}
+
+/** Like @ref drgn_type_has_member(), but takes the length of @p member_name. */
+struct drgn_error *drgn_type_has_member_len(struct drgn_type *type,
+					    const char *member_name,
+					    size_t member_name_len, bool *ret);
+
+/**
+ * Return whether a @ref drgn_type has a member with the given name.
+ *
+ * @param[in] type Structure, union, or class type.
+ * @param[in] member_name Name of member.
+ */
+static inline struct drgn_error *drgn_type_has_member(struct drgn_type *type,
+						      const char *member_name,
+						      bool *ret)
+{
+	return drgn_type_has_member_len(type, member_name, strlen(member_name),
+					ret);
+}
+
+/**
+ * Format the name of a type as a string.
+ *
+ * This will format the name of the type as it would be referred to in its
+ * programming language.
+ *
+ * @param[in] qualified_type Type to format.
+ * @param[out] ret Returned string. On success, it must be freed with @c free().
+ * On error, its contents are undefined.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *
+drgn_format_type_name(struct drgn_qualified_type qualified_type, char **ret);
+
+/**
+ * Format the definition of a type as a string.
+ *
+ * This will format the type as it would be defined in its programming language.
+ *
+ * @param[in] qualified_type Type to format.
+ * @param[out] ret Returned string. On success, it must be freed with @c free().
+ * On error, its contents are undefined.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *drgn_format_type(struct drgn_qualified_type qualified_type,
+				    char **ret);
+
+/** @} */
+
+/**
  * @defgroup Symbols Symbols
  *
  * Symbol table entries.
@@ -2432,11 +2588,6 @@ bool drgn_symbol_eq(struct drgn_symbol *a, struct drgn_symbol *b);
 
 struct drgn_stack_trace;
 
-struct drgn_stack_frame {
-	struct drgn_stack_trace *trace;
-	size_t i;
-};
-
 /** Destroy a @ref drgn_stack_trace. */
 void drgn_stack_trace_destroy(struct drgn_stack_trace *trace);
 
@@ -2453,8 +2604,17 @@ size_t drgn_stack_trace_num_frames(struct drgn_stack_trace *trace);
 struct drgn_error *drgn_format_stack_trace(struct drgn_stack_trace *trace,
 					   char **ret);
 
-/** Get the return address at a stack frame. */
-uint64_t drgn_stack_frame_pc(struct drgn_stack_frame frame);
+/** Return whether a stack frame was interrupted (e.g., by a signal). */
+bool drgn_stack_frame_interrupted(struct drgn_stack_trace *trace, size_t frame);
+
+/**
+ * Get the program counter at a stack frame.
+ *
+ * @param[out] ret Returned program counter.
+ * @return @c true if the program counter is known, @c false if it is not.
+ */
+bool drgn_stack_frame_pc(struct drgn_stack_trace *trace, size_t frame,
+			 uint64_t *ret);
 
 /**
  * Get the function symbol at a stack frame.
@@ -2463,18 +2623,20 @@ uint64_t drgn_stack_frame_pc(struct drgn_stack_frame frame);
  * drgn_symbol_destroy(). On error, its contents are undefined.
  * @return @c NULL on success, non-@c NULL on error.
  */
-struct drgn_error *drgn_stack_frame_symbol(struct drgn_stack_frame frame,
+struct drgn_error *drgn_stack_frame_symbol(struct drgn_stack_trace *trace,
+					   size_t frame,
 					   struct drgn_symbol **ret);
-
-/** Get the value of a register (by number) in a stack frame. */
-struct drgn_error *drgn_stack_frame_register(struct drgn_stack_frame frame,
-					     enum drgn_register_number regno,
-					     uint64_t *ret);
-
-/** Get the value of a register (by name) in a stack frame. */
-struct drgn_error *
-drgn_stack_frame_register_by_name(struct drgn_stack_frame frame,
-				  const char *name, uint64_t *ret);
+/**
+ * Get the value of a register in a stack frame.
+ *
+ * @param[in] reg Register to get. Must be from the platform of the program that
+ * the trace was taken from.
+ * @param[out] ret Returned register value.
+ * @return @c true on success, @c false if the value is not known or the
+ * register is too large to return in a @c uint64_t.
+ */
+bool drgn_stack_frame_register(struct drgn_stack_trace *trace, size_t frame,
+			       const struct drgn_register *reg, uint64_t *ret);
 
 /**
  * Get a stack trace for the thread with the given thread ID.

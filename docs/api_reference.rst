@@ -7,7 +7,7 @@ Programs
 --------
 
 .. drgndoc:: Program
-    :exclude: (void|int|bool|float|complex|struct|union|class|enum|typedef|pointer|array|function)_type
+    :exclude: (void|int|bool|float|struct|union|class|enum|typedef|pointer|array|function)_type
 .. drgndoc:: ProgramFlags
 .. drgndoc:: FindObjectFlags
 
@@ -84,9 +84,11 @@ Types
 .. drgndoc:: TypeMember
 .. drgndoc:: TypeEnumerator
 .. drgndoc:: TypeParameter
+.. drgndoc:: TypeTemplateParameter
 .. drgndoc:: TypeKind
 .. drgndoc:: PrimitiveType
 .. drgndoc:: Qualifiers
+.. drgndoc:: offsetof
 
 .. _api-type-constructors:
 
@@ -100,7 +102,6 @@ can be used just like types obtained from :meth:`Program.type()`.
 .. drgndoc:: Program.int_type
 .. drgndoc:: Program.bool_type
 .. drgndoc:: Program.float_type
-.. drgndoc:: Program.complex_type
 .. drgndoc:: Program.struct_type
 .. drgndoc:: Program.union_type
 .. drgndoc:: Program.class_type
@@ -123,4 +124,5 @@ Exceptions
 
 .. drgndoc:: FaultError
 .. drgndoc:: MissingDebugInfoError
+.. drgndoc:: ObjectAbsentError
 .. drgndoc:: OutOfBoundsError

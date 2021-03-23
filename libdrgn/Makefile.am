@@ -3,25 +3,31 @@
 
 ACLOCAL_AMFLAGS = -I m4
 
-SUBDIRS = elfutils include
-
 .DELETE_ON_ERROR:
 
-AM_CPPFLAGS = -isystem include -D_GNU_SOURCE
+AM_CPPFLAGS = -I $(top_srcdir)/include -D_GNU_SOURCE
+
+noinst_HEADERS = include/dwarf.h \
+		 include/elf.h \
+		 include/elfutils/known-dwarf.h
 
 include_HEADERS = drgn.h
 
-BUILT_SOURCES = drgn.h
+ARCH_DEFS = arch_ppc64.defs \
+	    arch_x86_64.defs
+
+BUILT_SOURCES = drgn.h $(ARCH_DEFS:.defs=.inc)
 
 noinst_LTLIBRARIES = libdrgnimpl.la
 
-ARCH_INS = arch_x86_64.c.in
-
-libdrgnimpl_la_SOURCES = $(ARCH_INS:.c.in=.c) \
+libdrgnimpl_la_SOURCES = $(ARCH_DEFS:.defs=.c) \
+			 arch_register_layout.h \
 			 binary_buffer.c \
 			 binary_buffer.h \
 			 binary_search_tree.h \
 			 bitops.h \
+			 cfi.h \
+			 cfi.c \
 			 cityhash.h \
 			 debug_info.c \
 			 debug_info.h \
@@ -34,6 +40,8 @@ libdrgnimpl_la_SOURCES = $(ARCH_INS:.c.in=.c) \
 			 language.c \
 			 language.h \
 			 language_c.c \
+			 lazy_object.c \
+			 lazy_object.h \
 			 lexer.c \
 			 lexer.h \
 			 linux_kernel.c \
@@ -53,11 +61,14 @@ libdrgnimpl_la_SOURCES = $(ARCH_INS:.c.in=.c) \
 			 pp.h \
 			 program.c \
 			 program.h \
+			 register_state.c \
+			 register_state.h \
 			 serialize.c \
 			 serialize.h \
 			 siphash.h \
 			 splay_tree.c \
 			 stack_trace.c \
+			 stack_trace.h \
 			 string_builder.c \
 			 string_builder.h \
 			 symbol.c \
@@ -68,8 +79,8 @@ libdrgnimpl_la_SOURCES = $(ARCH_INS:.c.in=.c) \
 			 vector.c \
 			 vector.h
 
-libdrgnimpl_la_CFLAGS = -fvisibility=hidden $(OPENMP_CFLAGS)
-libdrgnimpl_la_LIBADD = $(OPENMP_LIBS)
+libdrgnimpl_la_CFLAGS = -fvisibility=hidden $(OPENMP_CFLAGS) $(elfutils_CFLAGS)
+libdrgnimpl_la_LIBADD = $(OPENMP_LIBS) $(elfutils_LIBS)
 
 if WITH_LIBKDUMPFILE
 libdrgnimpl_la_SOURCES += kdump.c
@@ -77,21 +88,21 @@ libdrgnimpl_la_CFLAGS += $(libkdumpfile_CFLAGS)
 libdrgnimpl_la_LIBADD += $(libkdumpfile_LIBS)
 endif
 
-arch_%.c: arch_%.c.in build-aux/gen_arch.awk build-aux/parse_arch.awk
-	$(AM_V_GEN)gawk -f $(word 3, $^) -f $(word 2, $^) $< > $@
+arch_%.inc: arch_%.defs build-aux/gen_arch.awk
+	$(AM_V_GEN)gawk -f $(word 2, $^) $< > $@
 
-drgn.h: configure.ac build-aux/gen_drgn_h.awk build-aux/parse_arch.awk $(ARCH_INS) drgn.h.in
-	$(AM_V_GEN)gawk -f $(word 2, $^) -f $(word 3, $^) \
-		-v version=@PACKAGE_VERSION@ \
-		$(wordlist 4, $(words $^), $^) > $@
-
-elfutils_LIBS = elfutils/libdw/libdw.a elfutils/libelf/libelf.a -lz -llzma -lbz2 -ldl
+drgn.h: drgn.h.in configure.ac
+	$(AM_V_GEN)sed \
+		-e 's/@DRGN_VERSION_MAJOR@/$(word 1,$(subst ., ,@PACKAGE_VERSION@))/g' \
+		-e 's/@DRGN_VERSION_MINOR@/$(word 2,$(subst ., ,@PACKAGE_VERSION@))/g' \
+		-e 's/@DRGN_VERSION_PATCH@/$(word 3,$(subst ., ,@PACKAGE_VERSION@))/g' \
+		$< > $@
 
 lib_LTLIBRARIES = libdrgn.la
 
 libdrgn_la_SOURCES =
 libdrgn_la_LDFLAGS = -version-info 0:0:0
-libdrgn_la_LIBADD = libdrgnimpl.la $(elfutils_LIBS)
+libdrgn_la_LIBADD = libdrgnimpl.la
 
 if WITH_PYTHON
 BUILT_SOURCES += python/docstrings.h
@@ -123,7 +134,7 @@ _drgn_la_CPPFLAGS = $(AM_CPPFLAGS) $(PYTHON_CPPFLAGS) -iquote $(srcdir)/python \
 		    -iquote python
 _drgn_la_LDFLAGS = -Wl,--exclude-libs,ALL -avoid-version -module -shared \
 		   -rpath $(pkgpyexecdir)
-_drgn_la_LIBADD = libdrgnimpl.la $(elfutils_LIBS)
+_drgn_la_LIBADD = libdrgnimpl.la
 
 if WITH_LIBKDUMPFILE
 _drgn_la_CFLAGS += $(libkdumpfile_CFLAGS)
@@ -141,10 +152,9 @@ python/docstrings.c: ../_drgn.pyi $(drgndoc_docstrings_deps)
 python/docstrings.h: ../_drgn.pyi $(drgndoc_docstrings_deps)
 	$(AM_V_GEN)$(drgndoc_docstrings) -H -m _drgn:drgn $< > $@
 
-EXTRA_DIST = $(ARCH_INS) build-aux/gen_arch.awk build-aux/gen_constants.py \
-	     build-aux/gen_drgn_h.awk build-aux/parse_arch.awk
+EXTRA_DIST = $(ARCH_DEFS) build-aux/gen_arch.awk build-aux/gen_constants.py
 
 EXTRA_PROGRAMS = examples/load_debug_info
 
 examples_load_debug_info_SOURCES = examples/load_debug_info.c
-examples_load_debug_info_LDADD = libdrgnimpl.la $(elfutils_LIBS)
+examples_load_debug_info_LDADD = libdrgnimpl.la

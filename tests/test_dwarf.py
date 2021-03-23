@@ -16,9 +16,10 @@ from drgn import (
     TypeEnumerator,
     TypeMember,
     TypeParameter,
+    TypeTemplateParameter,
 )
-from tests import DEFAULT_LANGUAGE, TestCase
-from tests.dwarf import DW_AT, DW_ATE, DW_FORM, DW_LANG, DW_TAG
+from tests import DEFAULT_LANGUAGE, TestCase, identical
+from tests.dwarf import DW_AT, DW_ATE, DW_END, DW_FORM, DW_LANG, DW_TAG
 from tests.dwarfwriter import DwarfAttrib, DwarfDie, compile_dwarf
 
 bool_die = DwarfDie(
@@ -267,30 +268,6 @@ class TestTypes(TestCase):
             "TEST",
         )
 
-    def test_complex(self):
-        prog = dwarf_program(
-            test_type_dies(
-                (
-                    DwarfDie(
-                        DW_TAG.base_type,
-                        (
-                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 16),
-                            DwarfAttrib(
-                                DW_AT.encoding, DW_FORM.data1, DW_ATE.complex_float
-                            ),
-                            DwarfAttrib(DW_AT.name, DW_FORM.string, "double _Complex"),
-                            DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),
-                        ),
-                    ),
-                    double_die,
-                )
-            )
-        )
-        self.assertEqual(
-            prog.type("TEST").type,
-            prog.complex_type("double _Complex", 16, prog.float_type("double", 8)),
-        )
-
     def test_unknown_base_type_encoding(self):
         prog = dwarf_program(
             test_type_dies(
@@ -306,6 +283,94 @@ class TestTypes(TestCase):
         )
         self.assertRaisesRegex(Exception, "unknown DWARF encoding", prog.type, "TEST")
 
+    def test_int_type_byteorder(self):
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.base_type,
+                        (
+                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 4),
+                            DwarfAttrib(DW_AT.encoding, DW_FORM.data1, DW_ATE.signed),
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "int"),
+                            DwarfAttrib(DW_AT.endianity, DW_FORM.data1, DW_END.big),
+                        ),
+                    ),
+                ),
+            )
+        )
+        self.assertIdentical(
+            prog.type("TEST").type, prog.int_type("int", 4, True, "big")
+        )
+
+    def test_bool_type_byteorder(self):
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.base_type,
+                        (
+                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 1),
+                            DwarfAttrib(DW_AT.encoding, DW_FORM.data1, DW_ATE.boolean),
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "_Bool"),
+                            DwarfAttrib(DW_AT.endianity, DW_FORM.data1, DW_END.big),
+                        ),
+                    ),
+                ),
+            )
+        )
+        self.assertIdentical(prog.type("TEST").type, prog.bool_type("_Bool", 1, "big"))
+
+    def test_float_type_byteorder(self):
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.base_type,
+                        (
+                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 4),
+                            DwarfAttrib(DW_AT.encoding, DW_FORM.data1, DW_ATE.float),
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "float"),
+                            DwarfAttrib(DW_AT.endianity, DW_FORM.data1, DW_END.big),
+                        ),
+                    ),
+                ),
+            )
+        )
+        self.assertIdentical(prog.type("TEST").type, prog.float_type("float", 4, "big"))
+
+    def test_byteorder_by_name(self):
+        # The only producer that uses DW_AT_endianity that I could find is GCC
+        # for the scalar_storage_order type attribute (see
+        # https://gcc.gnu.org/onlinedocs/gcc/Common-Type-Attributes.html). It
+        # always places the standard DIE before the DIE with DW_AT_endianity,
+        # which luckily guarantees that we'll use the standard one when doing a
+        # name lookup.
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.base_type,
+                        (
+                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 4),
+                            DwarfAttrib(DW_AT.encoding, DW_FORM.data1, DW_ATE.signed),
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "int"),
+                        ),
+                    ),
+                    DwarfDie(
+                        DW_TAG.base_type,
+                        (
+                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 4),
+                            DwarfAttrib(DW_AT.encoding, DW_FORM.data1, DW_ATE.signed),
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "int"),
+                            DwarfAttrib(DW_AT.endianity, DW_FORM.data1, DW_END.big),
+                        ),
+                    ),
+                ),
+            )
+        )
+        self.assertIdentical(prog.type("int"), prog.int_type("int", 4, True, "little"))
+
     def test_qualifier(self):
         prog = dwarf_program(
             test_type_dies(
@@ -317,7 +382,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.int_type("int", 4, True, qualifiers=Qualifiers.CONST),
         )
@@ -344,7 +409,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.int_type(
                 "int",
@@ -359,7 +424,7 @@ class TestTypes(TestCase):
 
     def test_qualifier_void(self):
         prog = dwarf_program(test_type_dies(DwarfDie(DW_TAG.const_type, ())))
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.void_type(qualifiers=Qualifiers.CONST)
         )
 
@@ -382,7 +447,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.void_type(
                 qualifiers=Qualifiers.CONST
@@ -429,7 +494,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "point",
@@ -475,7 +540,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 None,
@@ -496,7 +561,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(prog.type("TEST").type, prog.struct_type(None, 0, ()))
+        self.assertIdentical(prog.type("TEST").type, prog.struct_type(None, 0, ()))
 
     def test_struct_incomplete(self):
         prog = dwarf_program(
@@ -510,7 +575,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(prog.type("TEST").type, prog.struct_type("point"))
+        self.assertIdentical(prog.type("TEST").type, prog.struct_type("point"))
 
     def test_struct_unnamed_member(self):
         prog = dwarf_program(
@@ -548,7 +613,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "point",
@@ -579,9 +644,8 @@ class TestTypes(TestCase):
                 ),
             )
         )
-        self.assertRaisesRegex(
-            Exception, "DW_TAG_member is missing DW_AT_type", prog.type, "TEST"
-        )
+        with self.assertRaisesRegex(Exception, "DW_TAG_member is missing DW_AT_type"):
+            prog.type("TEST").type.members[0].type
 
     def test_struct_member_invalid_type(self):
         prog = dwarf_program(
@@ -603,9 +667,8 @@ class TestTypes(TestCase):
                 ),
             )
         )
-        self.assertRaisesRegex(
-            Exception, "DW_TAG_member has invalid DW_AT_type", prog.type, "TEST"
-        )
+        with self.assertRaisesRegex(Exception, "DW_TAG_member has invalid DW_AT_type"):
+            prog.type("TEST").type.members[0].type
 
     def test_struct_member_invalid_location(self):
         prog = dwarf_program(
@@ -716,7 +779,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.pointer_type(
                 prog.struct_type(
@@ -812,8 +875,73 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.pointer_type(prog.struct_type("point"))
+        )
+
+    def test_incomplete_to_complete_specification(self):
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.pointer_type,
+                        (
+                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 8),
+                            DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),
+                        ),
+                    ),
+                    DwarfDie(
+                        DW_TAG.structure_type,
+                        (
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "point"),
+                            DwarfAttrib(DW_AT.declaration, DW_FORM.flag_present, True),
+                        ),
+                    ),
+                    DwarfDie(
+                        DW_TAG.structure_type,
+                        (
+                            DwarfAttrib(DW_AT.specification, DW_FORM.ref4, 1),
+                            DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 8),
+                        ),
+                        (
+                            DwarfDie(
+                                DW_TAG.member,
+                                (
+                                    DwarfAttrib(DW_AT.name, DW_FORM.string, "x"),
+                                    DwarfAttrib(
+                                        DW_AT.data_member_location, DW_FORM.data1, 0
+                                    ),
+                                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 3),
+                                ),
+                            ),
+                            DwarfDie(
+                                DW_TAG.member,
+                                (
+                                    DwarfAttrib(DW_AT.name, DW_FORM.string, "y"),
+                                    DwarfAttrib(
+                                        DW_AT.data_member_location, DW_FORM.data1, 4
+                                    ),
+                                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 3),
+                                ),
+                            ),
+                        ),
+                    ),
+                    int_die,
+                )
+            )
+        )
+        self.assertIdentical(
+            prog.type("TEST").type,
+            prog.pointer_type(
+                prog.struct_type(
+                    "point",
+                    8,
+                    (
+                        TypeMember(prog.int_type("int", 4, True), "x"),
+                        TypeMember(prog.int_type("int", 4, True), "y", 32),
+                    ),
+                )
+            ),
         )
 
     def test_filename(self):
@@ -900,13 +1028,13 @@ class TestTypes(TestCase):
         prog = dwarf_program(dies)
         for dir in ["", "src", "usr/src", "/usr/src"]:
             with self.subTest(dir=dir):
-                self.assertEqual(
+                self.assertIdentical(
                     prog.type("struct point", os.path.join(dir, "foo.c")),
                     point_type(prog),
                 )
         for dir in ["", "bar", "src/bar", "usr/src/bar", "/usr/src/bar"]:
             with self.subTest(dir=dir):
-                self.assertEqual(
+                self.assertIdentical(
                     prog.type("struct point", os.path.join(dir, "baz.c")),
                     other_point_type(prog),
                 )
@@ -920,21 +1048,22 @@ class TestTypes(TestCase):
         prog = dwarf_program(dies)
         for dir in ["xy", "src/xy", "usr/src/xy", "/usr/src/xy"]:
             with self.subTest(dir=dir):
-                self.assertEqual(
+                self.assertIdentical(
                     prog.type("struct point", os.path.join(dir, "foo.h")),
                     point_type(prog),
                 )
         for dir in ["ab", "include/ab", "usr/include/ab", "/usr/include/ab"]:
             with self.subTest(dir=dir):
-                self.assertEqual(
+                self.assertIdentical(
                     prog.type("struct point", os.path.join(dir, "foo.h")),
                     other_point_type(prog),
                 )
         for filename in [None, "foo.h"]:
             with self.subTest(filename=filename):
-                self.assertIn(
-                    prog.type("struct point", filename),
-                    (point_type(prog), other_point_type(prog)),
+                t = prog.type("struct point", filename)
+                self.assertTrue(
+                    identical(t, point_type(prog))
+                    or identical(t, other_point_type(prog))
                 )
 
     def test_bit_field_data_bit_offset(self):
@@ -979,15 +1108,27 @@ class TestTypes(TestCase):
 
         for little_endian in [True, False]:
             prog = dwarf_program(test_type_dies(dies), little_endian=little_endian)
-            self.assertEqual(
+            self.assertIdentical(
                 prog.type("TEST").type,
                 prog.struct_type(
                     "point",
                     8,
                     [
                         TypeMember(prog.int_type("int", 4, True), "x", 0),
-                        TypeMember(prog.int_type("int", 4, True), "y", 32, 12),
-                        TypeMember(prog.int_type("int", 4, True), "z", 44, 20),
+                        TypeMember(
+                            Object(
+                                prog, prog.int_type("int", 4, True), bit_field_size=12
+                            ),
+                            "y",
+                            32,
+                        ),
+                        TypeMember(
+                            Object(
+                                prog, prog.int_type("int", 4, True), bit_field_size=20
+                            ),
+                            "z",
+                            44,
+                        ),
                     ],
                 ),
             )
@@ -1038,15 +1179,23 @@ class TestTypes(TestCase):
             ),
             little_endian=False,
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "point",
                 8,
                 [
                     TypeMember(prog.int_type("int", 4, True), "x", 0),
-                    TypeMember(prog.int_type("int", 4, True), "y", 32, 12),
-                    TypeMember(prog.int_type("int", 4, True), "z", 44, 20),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=12),
+                        "y",
+                        32,
+                    ),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=20),
+                        "z",
+                        44,
+                    ),
                 ],
             ),
         )
@@ -1103,15 +1252,23 @@ class TestTypes(TestCase):
             ),
             little_endian=False,
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "point",
                 8,
                 [
                     TypeMember(prog.int_type("int", 4, True), "x", 0),
-                    TypeMember(prog.int_type("int", 4, True), "y", 32, 12),
-                    TypeMember(prog.int_type("int", 4, True), "z", 44, 20),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=12),
+                        "y",
+                        32,
+                    ),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=20),
+                        "z",
+                        44,
+                    ),
                 ],
             ),
         )
@@ -1167,15 +1324,23 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "point",
                 8,
                 [
                     TypeMember(prog.int_type("int", 4, True), "x", 0),
-                    TypeMember(prog.int_type("int", 4, True), "y", 32, 12),
-                    TypeMember(prog.int_type("int", 4, True), "z", 44, 20),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=12),
+                        "y",
+                        32,
+                    ),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=20),
+                        "z",
+                        44,
+                    ),
                 ],
             ),
         )
@@ -1235,15 +1400,23 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "point",
                 8,
                 [
                     TypeMember(prog.int_type("int", 4, True), "x", 0),
-                    TypeMember(prog.int_type("int", 4, True), "y", 32, 12),
-                    TypeMember(prog.int_type("int", 4, True), "z", 44, 20),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=12),
+                        "y",
+                        32,
+                    ),
+                    TypeMember(
+                        Object(prog, prog.int_type("int", 4, True), bit_field_size=20),
+                        "z",
+                        44,
+                    ),
                 ],
             ),
         )
@@ -1280,7 +1453,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.union_type(
                 "option",
@@ -1339,7 +1512,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.class_type(
                 "coord",
@@ -1351,6 +1524,81 @@ class TestTypes(TestCase):
                 ),
             ),
         )
+
+    def test_class_template(self):
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.class_type,
+                        (
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "Array"),
+                            DwarfAttrib(DW_AT.declaration, DW_FORM.flag_present, True),
+                        ),
+                        (
+                            DwarfDie(
+                                DW_TAG.template_type_parameter,
+                                (
+                                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),
+                                    DwarfAttrib(DW_AT.name, DW_FORM.string, "T"),
+                                ),
+                            ),
+                            DwarfDie(
+                                DW_TAG.template_value_parameter,
+                                (
+                                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 2),
+                                    DwarfAttrib(DW_AT.name, DW_FORM.string, "N"),
+                                    DwarfAttrib(DW_AT.const_value, DW_FORM.data1, 2),
+                                ),
+                            ),
+                        ),
+                    ),
+                    int_die,
+                    unsigned_int_die,
+                )
+            )
+        )
+        self.assertIdentical(
+            prog.type("TEST").type,
+            prog.class_type(
+                "Array",
+                template_parameters=(
+                    TypeTemplateParameter(prog.int_type("int", 4, True), "T"),
+                    TypeTemplateParameter(
+                        Object(prog, prog.int_type("unsigned int", 4, False), 2), "N"
+                    ),
+                ),
+            ),
+        )
+
+    def test_template_value_parameter_missing_value(self):
+        with self.assertRaisesRegex(
+            Exception, "DW_AT_template_value_parameter is missing value"
+        ):
+            dwarf_program(
+                test_type_dies(
+                    (
+                        DwarfDie(
+                            DW_TAG.class_type,
+                            (
+                                DwarfAttrib(
+                                    DW_AT.declaration, DW_FORM.flag_present, True
+                                ),
+                            ),
+                            (
+                                DwarfDie(
+                                    DW_TAG.template_value_parameter,
+                                    (
+                                        DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),
+                                        DwarfAttrib(DW_AT.name, DW_FORM.string, "N"),
+                                    ),
+                                ),
+                            ),
+                        ),
+                        unsigned_int_die,
+                    )
+                )
+            ).type("TEST").type.template_parameters[0].argument
 
     def test_lazy_cycle(self):
         prog = dwarf_program(
@@ -1388,7 +1636,7 @@ class TestTypes(TestCase):
         type_ = prog.struct_type(
             "foo", 8, (TypeMember(lambda: prog.pointer_type(type_), "next"),)
         )
-        self.assertEqual(prog.type("TEST").type, type_)
+        self.assertIdentical(prog.type("TEST").type, type_)
 
     def test_infinite_cycle(self):
         prog = dwarf_program(
@@ -1443,7 +1691,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.enum_type(
                 "color",
@@ -1494,7 +1742,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.enum_type(
                 None,
@@ -1523,7 +1771,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.enum_type("color", prog.int_type("unsigned int", 4, False), ()),
         )
@@ -1540,7 +1788,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(prog.type("TEST").type, prog.enum_type("color"))
+        self.assertIdentical(prog.type("TEST").type, prog.enum_type("color"))
 
     def test_enum_old_gcc(self):
         # GCC < 5.1
@@ -1578,7 +1826,7 @@ class TestTypes(TestCase):
                 ),
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.enum_type(
                 "color",
@@ -1627,7 +1875,7 @@ class TestTypes(TestCase):
                 ),
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.enum_type(
                 "color",
@@ -1893,7 +2141,7 @@ class TestTypes(TestCase):
             )
         )
 
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("struct point"),
             prog.struct_type(
                 "point",
@@ -1905,7 +2153,7 @@ class TestTypes(TestCase):
             ),
         )
         self.assertRaisesRegex(LookupError, "could not find", prog.type, "union point")
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("union option"),
             prog.union_type(
                 "option",
@@ -1919,7 +2167,7 @@ class TestTypes(TestCase):
         self.assertRaisesRegex(
             LookupError, "could not find", prog.type, "struct option"
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("enum color"),
             prog.enum_type(
                 "color",
@@ -1948,7 +2196,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.typedef_type("INT", prog.int_type("int", 4, True)),
         )
@@ -1979,7 +2227,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.typedef_type("VOID", prog.void_type())
         )
 
@@ -1996,7 +2244,7 @@ class TestTypes(TestCase):
                 int_die,
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("pid_t"),
             prog.typedef_type("pid_t", prog.int_type("int", 4, True)),
         )
@@ -2013,10 +2261,10 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.pointer_type(prog.int_type("int", 4, True))
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.pointer_type(prog.int_type("int", 4, True), 8)
         )
 
@@ -2035,13 +2283,15 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.pointer_type(prog.int_type("int", 4, True), 4)
         )
 
     def test_pointer_void(self):
         prog = dwarf_program(test_type_dies(DwarfDie(DW_TAG.pointer_type, ())))
-        self.assertEqual(prog.type("TEST").type, prog.pointer_type(prog.void_type()))
+        self.assertIdentical(
+            prog.type("TEST").type, prog.pointer_type(prog.void_type())
+        )
 
     def test_array(self):
         prog = dwarf_program(
@@ -2061,7 +2311,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.array_type(prog.int_type("int", 4, True), 2)
         )
 
@@ -2087,7 +2337,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.array_type(prog.array_type(prog.int_type("int", 4, True), 3), 2),
         )
@@ -2118,7 +2368,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.array_type(
                 prog.array_type(prog.array_type(prog.int_type("int", 4, True), 4), 3), 2
@@ -2165,7 +2415,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.array_type(prog.int_type("int", 4, True), 0)
         )
 
@@ -2187,7 +2437,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.array_type(prog.int_type("int", 4, True), 0)
         )
 
@@ -2202,7 +2452,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.array_type(prog.int_type("int", 4, True))
         )
 
@@ -2219,7 +2469,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.array_type(prog.int_type("int", 4, True))
         )
 
@@ -2243,7 +2493,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.array_type(prog.array_type(prog.int_type("int", 4, True), 3)),
         )
@@ -2271,7 +2521,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.array_type(prog.array_type(prog.int_type("int", 4, True), 0), 3),
         )
@@ -2297,7 +2547,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.array_type(prog.array_type(prog.int_type("int", 4, True), 0), 3),
         )
@@ -2339,7 +2589,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.array_type(
                 prog.typedef_type(
@@ -2383,7 +2633,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.array_type(
                 prog.typedef_type(
@@ -2431,7 +2681,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 None,
@@ -2489,7 +2739,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 None,
@@ -2541,7 +2791,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 None,
@@ -2580,12 +2830,63 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 None,
                 4,
                 (TypeMember(prog.array_type(prog.int_type("int", 4, True), 0), "a"),),
+            ),
+        )
+
+    def test_qualified_zero_length_array_only_member_old_gcc(self):
+        # GCC < 9.0.
+        # struct {
+        #   const int a[0];
+        # };
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.structure_type,
+                        (DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 4),),
+                        (
+                            DwarfDie(
+                                DW_TAG.member,
+                                (
+                                    DwarfAttrib(DW_AT.name, DW_FORM.string, "a"),
+                                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),
+                                ),
+                            ),
+                        ),
+                    ),
+                    DwarfDie(
+                        DW_TAG.const_type, (DwarfAttrib(DW_AT.type, DW_FORM.ref4, 2),)
+                    ),
+                    DwarfDie(
+                        DW_TAG.array_type,
+                        (DwarfAttrib(DW_AT.type, DW_FORM.ref4, 3),),
+                        (DwarfDie(DW_TAG.subrange_type, ()),),
+                    ),
+                    int_die,
+                )
+            )
+        )
+        self.assertIdentical(
+            prog.type("TEST").type,
+            prog.struct_type(
+                None,
+                4,
+                (
+                    TypeMember(
+                        prog.array_type(
+                            prog.int_type("int", 4, True),
+                            0,
+                            qualifiers=Qualifiers.CONST,
+                        ),
+                        "a",
+                    ),
+                ),
             ),
         )
 
@@ -2633,7 +2934,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "foo",
@@ -2684,7 +2985,7 @@ class TestTypes(TestCase):
         )
 
         prog = dwarf_program(test_type_dies(dies))
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "foo",
@@ -2702,18 +3003,18 @@ class TestTypes(TestCase):
         # Although the ZARRAY type must be a zero-length array in the context
         # of the structure, it could still be an incomplete array if used
         # elsewhere.
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("ZARRAY"),
             prog.typedef_type("ZARRAY", prog.array_type(prog.int_type("int", 4, True))),
         )
 
         # Make sure it still works if we parse the array type first.
         prog = dwarf_program(test_type_dies(dies))
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("ZARRAY"),
             prog.typedef_type("ZARRAY", prog.array_type(prog.int_type("int", 4, True))),
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 "foo",
@@ -2771,7 +3072,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 None,
@@ -2821,7 +3122,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.struct_type(
                 None,
@@ -2875,7 +3176,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.union_type(
                 None,
@@ -2925,7 +3226,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.union_type(
                 None,
@@ -2939,7 +3240,7 @@ class TestTypes(TestCase):
 
     def test_pointer_size(self):
         prog = dwarf_program(base_type_dies, bits=32)
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("int *"), prog.pointer_type(prog.int_type("int", 4, True), 4)
         )
 
@@ -2956,7 +3257,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.function_type(prog.int_type("int", 4, True), (), False),
         )
@@ -2964,7 +3265,7 @@ class TestTypes(TestCase):
     def test_function_void_return(self):
         # void foo(void)
         prog = dwarf_program(test_type_dies(DwarfDie(DW_TAG.subroutine_type, ())))
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type, prog.function_type(prog.void_type(), (), False)
         )
 
@@ -2988,7 +3289,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.function_type(
                 prog.int_type("int", 4, True),
@@ -3020,7 +3321,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.function_type(
                 prog.int_type("int", 4, True),
@@ -3043,7 +3344,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.function_type(prog.int_type("int", 4, True), (), True),
         )
@@ -3069,7 +3370,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.function_type(
                 prog.int_type("int", 4, True),
@@ -3102,7 +3403,7 @@ class TestTypes(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.function_type(
                 prog.void_type(),
@@ -3111,16 +3412,59 @@ class TestTypes(TestCase):
             ),
         )
 
+    def test_function_template(self):
+        prog = dwarf_program(
+            test_type_dies(
+                (
+                    DwarfDie(
+                        DW_TAG.subroutine_type,
+                        (DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),),
+                        (
+                            DwarfDie(DW_TAG.unspecified_parameters, ()),
+                            DwarfDie(
+                                DW_TAG.template_type_parameter,
+                                (DwarfAttrib(DW_AT.name, DW_FORM.string, "T"),),
+                            ),
+                            DwarfDie(
+                                DW_TAG.template_value_parameter,
+                                (
+                                    DwarfAttrib(DW_AT.type, DW_FORM.ref4, 2),
+                                    DwarfAttrib(DW_AT.name, DW_FORM.string, "N"),
+                                    DwarfAttrib(DW_AT.const_value, DW_FORM.data1, 2),
+                                ),
+                            ),
+                        ),
+                    ),
+                    int_die,
+                    unsigned_int_die,
+                )
+            )
+        )
+        self.assertIdentical(
+            prog.type("TEST").type,
+            prog.function_type(
+                prog.int_type("int", 4, True),
+                (),
+                is_variadic=True,
+                template_parameters=(
+                    TypeTemplateParameter(prog.void_type(), "T"),
+                    TypeTemplateParameter(
+                        Object(prog, prog.int_type("unsigned int", 4, False), 2), "N"
+                    ),
+                ),
+            ),
+        )
+
     def test_language(self):
         for name, lang in DW_LANG.__members__.items():
             if re.fullmatch("C[0-9]*", name):
                 prog = dwarf_program(test_type_dies(int_die), lang=lang)
-                self.assertEqual(
+                self.assertIdentical(
                     prog.type("TEST").type,
                     prog.int_type("int", 4, True, language=Language.C),
                 )
         prog = dwarf_program(test_type_dies(int_die), lang=DW_LANG.BLISS)
-        self.assertEqual(
+        self.assertIdentical(
             prog.type("TEST").type,
             prog.int_type("int", 4, True, language=DEFAULT_LANGUAGE),
         )
@@ -3185,10 +3529,10 @@ class TestObjects(TestCase):
                 TypeEnumerator("BLUE", 2),
             ),
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog.object("RED", FindObjectFlags.CONSTANT), Object(prog, type_, value=0)
         )
-        self.assertEqual(prog["BLUE"], Object(prog, type_, value=2))
+        self.assertIdentical(prog["BLUE"], Object(prog, type_, value=2))
 
     def test_constant_unsigned_enum(self):
         prog = dwarf_program(
@@ -3212,7 +3556,7 @@ class TestObjects(TestCase):
                 ),
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["FLAG"],
             Object(
                 prog,
@@ -3247,19 +3591,19 @@ class TestObjects(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["abs"],
             Object(
                 prog,
                 prog.function_type(
                     prog.int_type("int", 4, True),
-                    (TypeParameter(prog.int_type("int", 1, True)),),
+                    (TypeParameter(prog.int_type("int", 4, True)),),
                     False,
                 ),
                 address=0x7FC3EB9B1C30,
             ),
         )
-        self.assertEqual(prog.object("abs", FindObjectFlags.FUNCTION), prog["abs"])
+        self.assertIdentical(prog.object("abs", FindObjectFlags.FUNCTION), prog["abs"])
         self.assertRaisesRegex(
             LookupError,
             "could not find variable",
@@ -3277,8 +3621,8 @@ class TestObjects(TestCase):
                 )
             )
         )
-        self.assertRaisesRegex(
-            LookupError, "could not find address", prog.object, "abort"
+        self.assertIdentical(
+            prog.object("abort"), Object(prog, prog.function_type(prog.void_type(), ()))
         )
 
     def test_variable(self):
@@ -3301,11 +3645,11 @@ class TestObjects(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["x"],
             Object(prog, prog.int_type("int", 4, True), address=0xFFFFFFFF01020304),
         )
-        self.assertEqual(prog.object("x", FindObjectFlags.VARIABLE), prog["x"])
+        self.assertIdentical(prog.object("x", FindObjectFlags.VARIABLE), prog["x"])
         self.assertRaisesRegex(
             LookupError,
             "could not find constant",
@@ -3329,9 +3673,7 @@ class TestObjects(TestCase):
                 )
             )
         )
-        self.assertRaisesRegex(
-            LookupError, "could not find address or value", prog.object, "x"
-        )
+        self.assertIdentical(prog.object("x"), Object(prog, "int"))
 
     def test_variable_unimplemented_location(self):
         prog = dwarf_program(
@@ -3375,7 +3717,9 @@ class TestObjects(TestCase):
                     )
                 )
             )
-            self.assertEqual(prog["x"], Object(prog, prog.int_type("int", 4, True), 1))
+            self.assertIdentical(
+                prog["x"], Object(prog, prog.int_type("int", 4, True), 1)
+            )
 
     def test_variable_const_unsigned(self):
         for form in (
@@ -3400,7 +3744,7 @@ class TestObjects(TestCase):
                     )
                 )
             )
-            self.assertEqual(
+            self.assertIdentical(
                 prog["x"], Object(prog, prog.int_type("unsigned int", 4, False), 1)
             )
 
@@ -3434,7 +3778,7 @@ class TestObjects(TestCase):
                 )
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["p"],
             Object(prog, prog.array_type(prog.int_type("int", 4, True), 2), [1, 2]),
         )
@@ -3499,7 +3843,7 @@ class TestObjects(TestCase):
             )
         )
 
-        self.assertEqual(
+        self.assertIdentical(
             prog["x"],
             Object(prog, prog.int_type("int", 4, True), address=0xFFFFFFFF01020304),
         )
@@ -3539,7 +3883,7 @@ class TestObjects(TestCase):
         )
 
         prog = dwarf_program(dies)
-        self.assertEqual(
+        self.assertIdentical(
             prog["x"],
             Object(prog, prog.int_type("int", 4, True), address=0xFFFFFFFF01020304),
         )
@@ -3564,10 +3908,10 @@ class TestScopes(TestCase):
                 ),
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["::target"], Object(prog, prog.int_type("int", 4, True), 123)
         )
-        self.assertEqual(prog["::target"], prog["target"])
+        self.assertIdentical(prog["::target"], prog["target"])
 
     def test_namespaces_single(self):
         prog = dwarf_program(
@@ -3589,7 +3933,7 @@ class TestScopes(TestCase):
                 ),
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["moho::target"], Object(prog, prog.int_type("int", 4, True), 123)
         )
 
@@ -3613,7 +3957,7 @@ class TestScopes(TestCase):
                 ),
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["moho::target"], Object(prog, prog.int_type("int", 4, True), 123)
         )
 
@@ -3659,7 +4003,7 @@ class TestScopes(TestCase):
                 ),
             )
         )
-        self.assertEqual(
+        self.assertIdentical(
             prog["moho::eve::kerbin::minmus"],
             Object(prog, prog.int_type("int", 4, True), 47),
         )
@@ -3717,3 +4061,44 @@ class TestProgram(TestCase):
         )
         self.assertFalse(dwarf_program(dies)["x"].prog_.flags & ProgramFlags.IS_LIVE)
         self.assertEqual(dwarf_program(dies)["x"].type_.name, "int")
+
+    def test_reference_counting_type_member(self):
+        dies = (
+            DwarfDie(
+                DW_TAG.structure_type,
+                (
+                    DwarfAttrib(DW_AT.name, DW_FORM.string, "foo"),
+                    DwarfAttrib(DW_AT.byte_size, DW_FORM.data1, 4),
+                ),
+                (
+                    DwarfDie(
+                        DW_TAG.member,
+                        (
+                            DwarfAttrib(DW_AT.name, DW_FORM.string, "bar"),
+                            DwarfAttrib(DW_AT.data_member_location, DW_FORM.data1, 0),
+                            DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),
+                        ),
+                    ),
+                ),
+            ),
+            int_die,
+        )
+        self.assertIsNotNone(repr(dwarf_program(dies).type("struct foo").members[0]))
+
+    def test_reference_counting_type_parameter(self):
+        dies = test_type_dies(
+            (
+                DwarfDie(
+                    DW_TAG.subroutine_type,
+                    (),
+                    (
+                        DwarfDie(
+                            DW_TAG.formal_parameter,
+                            (DwarfAttrib(DW_AT.type, DW_FORM.ref4, 1),),
+                        ),
+                    ),
+                ),
+                int_die,
+            )
+        )
+        self.assertIsNotNone(repr(dwarf_program(dies).type("TEST").type.parameters[0]))

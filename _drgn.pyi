@@ -16,6 +16,7 @@ from typing import (
     Dict,
     Iterable,
     Iterator,
+    Mapping,
     Optional,
     Sequence,
     Union,
@@ -60,7 +61,7 @@ class Program:
 
     def __init__(self, platform: Optional[Platform] = None) -> None:
         """
-        This class can be constructed directly, but it is usually more
+        Create a ``Program`` with no target program. It is usually more
         convenient to use one of the :ref:`api-program-constructors`.
 
         :param platform: The platform of the program, or ``None`` if it should
@@ -456,6 +457,7 @@ class Program:
         name: str,
         size: IntegerLike,
         is_signed: bool,
+        byteorder: Optional[str] = None,
         *,
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
@@ -466,6 +468,8 @@ class Program:
         :param name: :attr:`Type.name`
         :param size: :attr:`Type.size`
         :param is_signed: :attr:`Type.is_signed`
+        :param byteorder: :attr:`Type.byteorder`, or ``None`` to use the
+            program's default byte order.
         :param qualifiers: :attr:`Type.qualifiers`
         :param lang: :attr:`Type.language`
         """
@@ -474,6 +478,7 @@ class Program:
         self,
         name: str,
         size: IntegerLike,
+        byteorder: Optional[str] = None,
         *,
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
@@ -483,6 +488,8 @@ class Program:
 
         :param name: :attr:`Type.name`
         :param size: :attr:`Type.size`
+        :param byteorder: :attr:`Type.byteorder`, or ``None`` to use the
+            program's default byte order.
         :param qualifiers: :attr:`Type.qualifiers`
         :param lang: :attr:`Type.language`
         """
@@ -491,6 +498,7 @@ class Program:
         self,
         name: str,
         size: IntegerLike,
+        byteorder: Optional[str] = None,
         *,
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
@@ -500,25 +508,8 @@ class Program:
 
         :param name: :attr:`Type.name`
         :param size: :attr:`Type.size`
-        :param qualifiers: :attr:`Type.qualifiers`
-        :param lang: :attr:`Type.language`
-        """
-        ...
-    def complex_type(
-        self,
-        name: str,
-        size: IntegerLike,
-        type: Type,
-        *,
-        qualifiers: Qualifiers = Qualifiers.NONE,
-        language: Optional[Language] = None,
-    ) -> Type:
-        """
-        Create a new complex type. It has kind :attr:`TypeKind.COMPLEX`.
-
-        :param name: :attr:`Type.name`
-        :param size: :attr:`Type.size`
-        :param type: The corresponding real type (:attr:`Type.type`)
+        :param byteorder: :attr:`Type.byteorder`, or ``None`` to use the
+            program's default byte order.
         :param qualifiers: :attr:`Type.qualifiers`
         :param lang: :attr:`Type.language`
         """
@@ -530,6 +521,7 @@ class Program:
         size: IntegerLike,
         members: Sequence[TypeMember],
         *,
+        template_parameters: Sequence[TypeTemplateParameter] = (),
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
     ) -> Type:
@@ -539,6 +531,7 @@ class Program:
         :param tag: :attr:`Type.tag`
         :param size: :attr:`Type.size`
         :param members: :attr:`Type.members`
+        :param template_parameters: :attr:`Type.template_parameters`
         :param qualifiers: :attr:`Type.qualifiers`
         :param lang: :attr:`Type.language`
         """
@@ -550,6 +543,7 @@ class Program:
         size: None = None,
         members: None = None,
         *,
+        template_parameters: Sequence[TypeTemplateParameter] = (),
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
     ) -> Type:
@@ -562,6 +556,7 @@ class Program:
         size: IntegerLike,
         members: Sequence[TypeMember],
         *,
+        template_parameters: Sequence[TypeTemplateParameter] = (),
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
     ) -> Type:
@@ -577,6 +572,7 @@ class Program:
         size: None = None,
         members: None = None,
         *,
+        template_parameters: Sequence[TypeTemplateParameter] = (),
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
     ) -> Type:
@@ -589,6 +585,7 @@ class Program:
         size: IntegerLike,
         members: Sequence[TypeMember],
         *,
+        template_parameters: Sequence[TypeTemplateParameter] = (),
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
     ) -> Type:
@@ -604,6 +601,7 @@ class Program:
         size: None = None,
         members: None = None,
         *,
+        template_parameters: Sequence[TypeTemplateParameter] = (),
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
     ) -> Type:
@@ -662,6 +660,7 @@ class Program:
         self,
         type: Type,
         size: Optional[int] = None,
+        byteorder: Optional[str] = None,
         *,
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
@@ -672,6 +671,8 @@ class Program:
         :param type: The referenced type (:attr:`Type.type`)
         :param size: :attr:`Type.size`, or ``None`` to use the program's
             default pointer size.
+        :param byteorder: :attr:`Type.byteorder`, or ``None`` to use the
+            program's default byte order.
         :param qualifiers: :attr:`Type.qualifiers`
         :param lang: :attr:`Type.language`
         """
@@ -699,6 +700,7 @@ class Program:
         parameters: Sequence[TypeParameter],
         is_variadic: bool = False,
         *,
+        template_parameters: Sequence[TypeTemplateParameter] = (),
         qualifiers: Qualifiers = Qualifiers.NONE,
         language: Optional[Language] = None,
     ) -> Type:
@@ -708,6 +710,7 @@ class Program:
         :param type: The return type (:attr:`Type.type`)
         :param parameters: :attr:`Type.parameters`
         :param is_variadic: :attr:`Type.is_variadic`
+        :param template_parameters: :attr:`Type.template_parameters`
         :param qualifiers: :attr:`Type.qualifiers`
         :param lang: :attr:`Type.language`
         """
@@ -796,6 +799,8 @@ class Platform:
         self, arch: Architecture, flags: Optional[PlatformFlags] = None
     ) -> None:
         """
+        Create a ``Platform``.
+
         :param arch: :attr:`Platform.arch`
         :param flags: :attr:`Platform.flags`; if ``None``, default flags for
             the architecture are used.
@@ -811,10 +816,13 @@ class Platform:
     """Processor registers on this platform."""
 
 class Architecture(enum.Enum):
-    """``Architecture`` represents an instruction set architecture."""
+    """An ``Architecture`` represents an instruction set architecture."""
 
     X86_64 = ...
     """The x86-64 architecture, a.k.a. AMD64."""
+
+    PPC64 = ...
+    """The 64-bit PowerPC architecture."""
 
     UNKNOWN = ...
     """
@@ -835,13 +843,8 @@ class PlatformFlags(enum.Flag):
 class Register:
     """A ``Register`` represents information about a processor register."""
 
-    name: str
-    """Name of this register."""
-
-    number: int
-    """
-    Arbitrary number which uniquely identifies this register on its platform.
-    """
+    names: Sequence[str]
+    """Names of this register."""
 
 host_platform: Platform
 """The platform of the host which is running drgn."""
@@ -863,14 +866,14 @@ class Language:
 class Object:
     """
     An ``Object`` represents a symbol or value in a program. An object may
-    exist in the memory of the program (a *reference*), or it may be a
-    temporary computed value (a *value*).
+    exist in the memory of the program (a *reference*), it may be a constant or
+    temporary computed value (a *value*), or it may be absent entirely (an
+    *absent* object).
 
     All instances of this class have two attributes: :attr:`prog_`, the program
     that the object is from; and :attr:`type_`, the type of the object.
-    Reference objects also have an :attr:`address_` attribute. Objects may also
-    have a :attr:`byteorder_`, :attr:`bit_offset_`, and
-    :attr:`bit_field_size_`.
+    Reference objects also have an :attr:`address_` and a :attr:`bit_offset_`.
+    Objects may also have a :attr:`bit_field_size_`.
 
     :func:`repr()` of an object returns a Python representation of the object:
 
@@ -897,8 +900,8 @@ class Object:
     .. note::
 
         The drgn CLI is set up so that objects are displayed in the "pretty"
-        format instead of with ``repr()`` (which is the default behavior of
-        Python's interactive mode). Therefore, it's usually not necessary to
+        format instead of with ``repr()`` (the latter is the default behavior
+        of Python's interactive mode). Therefore, it's usually not necessary to
         call ``print()`` in the drgn CLI.
 
     Objects support the following operators:
@@ -940,40 +943,74 @@ class Object:
     conflicting with structure, union, or class members. The attributes and
     methods always take precedence; use :meth:`member_()` if there is a
     conflict.
+
+    Objects are usually obtained directly from a :class:`Program`, but they can
+    be constructed manually, as well (for example, if you got a variable
+    address from a log file).
     """
 
+    @overload
     def __init__(
         self,
         prog: Program,
-        type: Union[str, Type, None] = None,
-        value: Any = None,
+        type: Union[str, Type],
+        # This should use numbers.Number, but mypy doesn't support it yet; see
+        # python/mypy#3186. Additionally, once mypy supports recursive types,
+        # we can make the Mapping and Sequence item types stricter; see
+        # python/mypy#731.
+        value: Union[IntegerLike, float, bool, Mapping[str, Any], Sequence[Any]],
         *,
-        address: Optional[IntegerLike] = None,
-        byteorder: Optional[str] = None,
-        bit_offset: Optional[IntegerLike] = None,
         bit_field_size: Optional[IntegerLike] = None,
     ) -> None:
         """
-        Objects are usually obtained directly from a :class:`Program`, but they
-        can be constructed manually, as well (for example, if you got a
-        variable address from a log file).
+        Create a value object given its type and value.
 
-        :param prog: The program to create this object in.
-        :param type: The type of the object. If omitted, this is deduced from
-            *value* according to the language's rules for literals.
-        :param value: The value of this object. See :meth:`value_()`.
-        :param address: The address of this object in the program. Either this
-            or *value* must be given, but not both.
-        :param byteorder: Byte order of the object. This should be ``'little'``
-            or ``'big'``. The default is ``None``, which indicates the program
-            byte order. This must be ``None`` for primitive values.
-        :param bit_offset: Offset in bits from the object's address to the
-            beginning of the object. The default is ``None``, which means no
-            offset. This must be ``None`` for primitive values.
-        :param bit_field_size: Size in bits of this object if it is a bit
-            field. The default is ``None``, which means the object is not a bit
-            field.
+        :param prog: Program to create the object in.
+        :param type: Type of the object.
+        :param value: Value of the object. See :meth:`value_()`.
+        :param bit_field_size: Size in bits of the object if it is a bit field.
+            The default is ``None``, which means the object is not a bit field.
         """
+        ...
+    @overload
+    def __init__(self, prog: Program, *, value: Union[int, float, bool]) -> None:
+        """
+        Create a value object from a "literal".
+
+        This is used to emulate a literal number in the source code of the
+        program. The type is deduced from *value* according to the language's
+        rules for literals.
+
+        :param value: Value of the literal.
+        """
+        ...
+    @overload
+    def __init__(
+        self,
+        prog: Program,
+        type: Union[str, Type],
+        *,
+        address: IntegerLike,
+        bit_offset: IntegerLike = 0,
+        bit_field_size: Optional[IntegerLike] = None,
+    ) -> None:
+        """
+        Create a reference object.
+
+        :param address: Address of the object in the program.
+        :param bit_offset: Offset in bits from *address* to the beginning of
+            the object.
+        """
+        ...
+    @overload
+    def __init__(
+        self,
+        prog: Program,
+        type: Union[str, Type],
+        *,
+        bit_field_size: Optional[IntegerLike] = None,
+    ) -> None:
+        """Create an absent object."""
         ...
     prog_: Program
     """Program that this object is from."""
@@ -981,19 +1018,25 @@ class Object:
     type_: Type
     """Type of this object."""
 
-    address_: Optional[int]
-    """Address of this object if it is a reference, ``None`` if it is a value."""
-
-    byteorder_: Optional[str]
+    absent_: bool
     """
-    Byte order of this object (either ``'little'`` or ``'big'``) if it is a
-    reference or a non-primitive value, ``None`` otherwise.
+    Whether this object is absent.
+
+    This is ``False`` for all values and references (even if the reference has
+    an invalid address).
+    """
+
+    address_: Optional[int]
+    """
+    Address of this object if it is a reference, ``None`` if it is a value or
+    absent.
     """
 
     bit_offset_: Optional[int]
     """
     Offset in bits from this object's address to the beginning of the object if
-    it is a reference or a non-primitive value, ``None`` otherwise.
+    it is a reference, ``None`` otherwise. This can only be non-zero for
+    scalars.
     """
 
     bit_field_size_: Optional[int]
@@ -1267,9 +1310,7 @@ def cast(type: Union[str, Type], obj: Object) -> Object:
     """
     ...
 
-def reinterpret(
-    type: Union[str, Type], obj: Object, byteorder: Optional[str] = None
-) -> Object:
+def reinterpret(type: Union[str, Type], obj: Object) -> Object:
     """
     Get a copy of the given object reinterpreted as another type and/or byte
     order.
@@ -1282,9 +1323,6 @@ def reinterpret(
 
     :param type: The type to reinterpret as.
     :param obj: The object to reinterpret.
-    :param byteorder: The byte order to reinterpret as. This should be
-        ``'little'`` or ``'big'``. The default is ``None``, which indicates the
-        program byte order.
     """
     ...
 
@@ -1294,12 +1332,16 @@ def container_of(ptr: Object, type: Union[str, Type], member: str) -> Object:
 
     This corresponds to the ``container_of()`` macro in C.
 
-    :param ptr: The pointer.
-    :param type: The type of the containing object.
-    :param member: The name of the member in ``type``.
-    :raises TypeError: if the object is not a pointer or the type is not a
-        structure, union, or class type
-    :raises LookupError: If the type does not have a member with the given name
+    :param ptr: Pointer to member in containing object.
+    :param type: Type of containing object.
+    :param member: Name of member in containing object. May include one or more
+        member references and zero or more array subscripts.
+    :return: Pointer to containing object.
+    :raises TypeError: if *ptr* is not a pointer or *type* is not a structure,
+        union, or class type
+    :raises ValueError: if the member is not byte-aligned (e.g., because it is
+        a bit field)
+    :raises LookupError: if *type* does not have a member with the given name
     """
     ...
 
@@ -1355,35 +1397,42 @@ class StackTrace:
 
 class StackFrame:
     """
-    A ``StackFrame`` represents a single *frame* (i.e., function call) in a
-    thread's call stack.
+    A ``StackFrame`` represents a single *frame* in a thread's call stack.
     """
 
+    interrupted: bool
+    """
+    Whether this stack frame was interrupted (for example, by a hardware
+    interrupt, signal, trap, etc.).
+
+    If this is ``True``, then the register values in this frame are the values
+    at the time that the frame was interrupted.
+
+    This is ``False`` if the frame is for a function call, in which case the
+    register values are the values when control returns to this frame. In
+    particular, the program counter is the return address, which is typically
+    the instruction after the call instruction.
+    """
     pc: int
-    """
-    The program counter at this stack frame.
-
-    For the innermost frame, this is typically the instruction that was being
-    executed when the stack trace was captured. For function calls, this is
-    generally the return address, i.e., the value of the program counter when
-    control returns to this frame.
-    """
+    """Program counter at this stack frame."""
     def symbol(self) -> Symbol:
         """
         Get the function symbol at this stack frame.
 
-        This may differ from :meth:`prog.symbol(frame.pc) <Program.symbol>`, as
-        for function calls, the program counter may be adjusted to the call
-        instruction instead of the return address.
+        This is equivalent to:
+
+        .. code-block:: python3
+
+            prog.symbol(frame.pc - (0 if frame.interrupted else 1))
         """
         ...
-    def register(self, reg: Union[str, IntegerLike, Register]) -> int:
+    def register(self, reg: str) -> int:
         """
-        Get the value of the given register at this stack frame. The register
-        can be specified by name (e.g., ``'rax'``), number (see
-        :attr:`Register.number`), or as a :class:`Register`.
+        Get the value of the given register at this stack frame.
 
-        :param reg: Register to get.
+        :param reg: Register name.
+        :raises ValueError: if the register name is not recognized
+        :raises LookupError: if the register value is not known
         """
         ...
     def registers(self) -> Dict[str, int]:
@@ -1416,14 +1465,6 @@ class Type:
 
     This class cannot be constructed directly. Instead, use one of the
     :ref:`api-type-constructors`.
-
-    .. note::
-
-        ``Type`` objects can be compared with ``==``. However, this is mostly
-        intended for testing and should not be used for type checking, as it
-        does a deep comparison that checks that the type definitions are
-        exactly the same, which is potentially time-consuming and
-        memory-intensive.
     """
 
     prog: Program
@@ -1447,7 +1488,7 @@ class Type:
     name: str
     """
     Name of this type. This is present for integer, boolean, floating-point,
-    complex, and typedef types.
+    and typedef types.
     """
 
     tag: Optional[str]
@@ -1459,8 +1500,8 @@ class Type:
     size: Optional[int]
     """
     Size of this type in bytes, or ``None`` if this is an incomplete type. This
-    is present for integer, boolean, floating-point, complex, structure, union,
-    class, and pointer types.
+    is present for integer, boolean, floating-point, structure, union, class,
+    and pointer types.
     """
 
     length: Optional[int]
@@ -1472,11 +1513,17 @@ class Type:
     is_signed: bool
     """Whether this type is signed. This is only present for integer types."""
 
+    byteorder: str
+    """
+    Byte order of this type: ``'little'`` if it is little-endian, or ``'big'``
+    if it is big-endian. This is present for integer, boolean, floating-point,
+    and pointer types.
+    """
+
     type: Type
     """
     Type underlying this type, defined as follows:
 
-    * For complex types, the corresponding the real type.
     * For typedef types, the aliased type.
     * For enumerated types, the compatible integer type, which is ``None`` if
       this is an incomplete type.
@@ -1509,6 +1556,12 @@ class Type:
     Whether this type takes a variable number of arguments. This is only
     present for function types.
     """
+
+    template_parameters: Sequence[TypeTemplateParameter]
+    """
+    List of template parameters of this type. This is present for structure,
+    union, class, and function types.
+    """
     def type_name(self) -> str:
         """Get a descriptive full name of this type."""
         ...
@@ -1533,6 +1586,33 @@ class Type:
     def unqualified(self) -> Type:
         """Get a copy of this type with no qualifiers."""
         ...
+    def member(self, name: str) -> TypeMember:
+        """
+        Look up a member in this type by name.
+
+        If this type has any unnamed members, this also matches members of
+        those unnamed members, recursively. If the member is found in an
+        unnamed member, :attr:`TypeMember.bit_offset` and
+        :attr:`TypeMember.offset` are adjusted accordingly.
+
+        :param name: Name of the member.
+        :raises TypeError: if this type is not a structure, union, or class
+            type
+        :raises LookupError: if this type does not have a member with the given
+            name
+        """
+        ...
+    def has_member(self, name: str) -> bool:
+        """
+        Return whether this type has a member with the given name.
+
+        If this type has any unnamed members, this also matches members of
+        those unnamed members, recursively.
+
+        :param name: Name of the member.
+        :raises TypeError: if this type is not a structure, union, or class
+            type
+        """
 
 class TypeMember:
     """
@@ -1541,21 +1621,41 @@ class TypeMember:
 
     def __init__(
         self,
-        type: Union[Type, Callable[[], Type]],
+        object_or_type: Union[Object, Type, Callable[[], Union[Object, Type]]],
         name: Optional[str] = None,
         bit_offset: int = 0,
-        bit_field_size: int = 0,
     ) -> None:
         """
-        :param type: :attr:`TypeMember.type`; may also be a callable that
-            takes no arguments and returns a :class:`Type`.
+        Create a ``TypeMember``.
+
+        :param object_or_type: One of:
+
+            1. :attr:`TypeMember.object` as an :class:`Object`.
+            2. :attr:`TypeMember.type` as a :class:`Type`. In this case,
+               ``object`` is set to an absent object with that type.
+            3. A callable that takes no arguments and returns one of the above.
+               It is called when ``object`` or ``type`` is first accessed, and
+               the result is cached.
         :param name: :attr:`TypeMember.name`
         :param bit_offset: :attr:`TypeMember.bit_offset`
-        :param bit_field_size: :attr:`TypeMember.bit_field_size`
         """
         ...
+    object: Object
+    """
+    Member as an :class:`Object`.
+
+    This is the default initializer for the member, or an absent object if the
+    member has no default initializer. (However, the DWARF specification as of
+    version 5 does not actually support default member initializers, so this is
+    usually absent.)
+    """
+
     type: Type
-    """Member type."""
+    """
+    Member type.
+
+    This is a shortcut for ``TypeMember.object.type``.
+    """
 
     name: Optional[str]
     """Member name, or ``None`` if the member is unnamed."""
@@ -1569,8 +1669,12 @@ class TypeMember:
     is not byte-aligned, accessing this attribute raises :exc:`ValueError`.
     """
 
-    bit_field_size: int
-    """Size in bits of this member if it is a bit field, zero otherwise."""
+    bit_field_size: Optional[int]
+    """
+    Size in bits of this member if it is a bit field, ``None`` if it is not.
+
+    This is a shortcut for ``TypeMember.object.bit_field_size_``.
+    """
 
 class TypeEnumerator:
     """
@@ -1587,6 +1691,8 @@ class TypeEnumerator:
 
     def __init__(self, name: str, value: int) -> None:
         """
+        Create a ``TypeEnumerator``.
+
         :param name: :attr:`TypeEnumerator.name`
         :param value: :attr:`TypeEnumerator.value`
         """
@@ -1606,19 +1712,109 @@ class TypeParameter:
     """
 
     def __init__(
-        self, type: Union[Type, Callable[[], Type]], name: Optional[str] = None
+        self,
+        default_argument_or_type: Union[
+            Object, Type, Callable[[], Union[Object, Type]]
+        ],
+        name: Optional[str] = None,
     ) -> None:
         """
-        :param type: :attr:`TypeParameter.type`; may also be a callable that
-            takes no arguments and returns a :class:`Type`.
+        Create a ``TypeParameter``.
+
+        :param default_argument_or_type: One of:
+
+            1. :attr:`TypeParameter.default_argument` as an :class:`Object`.
+            2. :attr:`TypeParameter.type` as a :class:`Type`. In this case,
+               ``default_argument`` is set to an absent object with that type.
+            3. A callable that takes no arguments and returns one of the above.
+               It is called when ``default_argument`` or ``type`` is first
+               accessed, and the result is cached.
         :param name: :attr:`TypeParameter.name`
         """
         ...
+    default_argument: Object
+    """
+    Default argument for parameter.
+
+    If the parameter does not have a default argument, then this is an absent
+    object.
+
+    .. note::
+
+        Neither GCC nor Clang emits debugging information for default arguments
+        (as of GCC 10 and Clang 11), and drgn does not yet parse it, so this is
+        usually absent.
+    """
+
     type: Type
-    """Parameter type."""
+    """
+    Parameter type.
+
+    This is the same as ``TypeParameter.default_argument.type_``.
+    """
 
     name: Optional[str]
     """Parameter name, or ``None`` if the parameter is unnamed."""
+
+class TypeTemplateParameter:
+    """
+    A ``TypeTemplateParameter`` represents a template parameter of a structure,
+    union, class, or function type.
+    """
+
+    def __init__(
+        self,
+        argument: Union[Type, Object, Callable[[], Union[Type, Object]]],
+        name: Optional[str] = None,
+        is_default: bool = False,
+    ) -> None:
+        """
+        Create a ``TypeTemplateParameter``.
+
+        :param argument: One of:
+
+            1. :attr:`TypeTemplateParameter.argument` as a :class:`Type` if the
+               parameter is a type template parameter.
+            2. :attr:`TypeTemplateParameter.argument` as a non-absent
+               :class:`Object` if the parameter is a non-type template
+               parameter.
+            3. A callable that takes no arguments and returns one of the above.
+               It is called when ``argument`` is first accessed, and the result
+               is cached.
+        :param name: :attr:`TypeTemplateParameter.name`
+        :param is_default: :attr:`TypeTemplateParameter.is_default`
+        """
+        ...
+    argument: Union[Type, Object]
+    """
+    Template argument.
+
+    If this is a type template parameter, then this is a :class:`Type`. If this
+    is a non-type template parameter, then this is an :class:`Object`.
+    """
+
+    name: Optional[str]
+    """Template parameter name, or ``None`` if the parameter is unnamed."""
+
+    is_default: bool
+    """
+    Whether :attr:`argument` is the default for the template parameter.
+
+    .. note::
+
+        There are two ways to interpret this:
+
+            1. The argument was omitted entirely and thus defaulted to the
+               default argument.
+            2. The (specified or defaulted) argument is the same as the default
+               argument.
+
+        Compilers are inconsistent about which interpretation they use.
+
+        GCC added this information in version 4.9. Clang added it in version 11
+        (and only when emitting DWARF version 5). If the program was compiled
+        by an older version, this is always false.
+    """
 
 class TypeKind(enum.Enum):
     """A ``TypeKind`` represents a kind of type."""
@@ -1731,6 +1927,25 @@ def sizeof(type_or_obj: Union[Type, Object]) -> int:
     """
     ...
 
+def offsetof(type: Type, member: str) -> int:
+    """
+    Get the offset (in bytes) of a member in a :class:`Type`.
+
+    This corresponds to |offsetof()|_ in C.
+
+    .. |offsetof()| replace:: ``offsetof()``
+    .. _offsetof(): https://en.cppreference.com/w/cpp/types/offsetof
+
+    :param type: Structure, union, or class type.
+    :param member: Name of member. May include one or more member references
+        and zero or more array subscripts.
+    :raises TypeError: if *type* is not a structure, union, or class type
+    :raises ValueError: if the member is not byte-aligned (e.g., because it is
+        a bit field)
+    :raises LookupError: if *type* does not have a member with the given name
+    """
+    ...
+
 class FaultError(Exception):
     """
     This error is raised when a bad memory access is attempted (i.e., when
@@ -1750,6 +1965,11 @@ class MissingDebugInfoError(Exception):
     This error is raised when one or more files in a program do not have debug
     information.
     """
+
+    ...
+
+class ObjectAbsentError(Exception):
+    """This error is raised when attempting to use an absent object."""
 
     ...
 

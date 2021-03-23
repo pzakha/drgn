@@ -37,7 +37,14 @@
     } while (0)
 #endif
 
-#define DRGNPY_PUBLIC __attribute__((visibility("default")))
+#define DRGNPY_PUBLIC __attribute__((__visibility__("default")))
+
+#define Py_RETURN_BOOL(cond) do {	\
+	if (cond)			\
+		Py_RETURN_TRUE;		\
+	else				\
+		Py_RETURN_FALSE;	\
+} while (0)
 
 typedef struct {
 	PyObject_HEAD
@@ -92,14 +99,18 @@ typedef struct {
 
 typedef struct {
 	PyObject_HEAD
-	Program *prog;
+	const struct drgn_register *reg;
+} Register;
+
+typedef struct {
+	PyObject_HEAD
 	struct drgn_stack_trace *trace;
 } StackTrace;
 
 typedef struct {
 	PyObject_HEAD
 	StackTrace *trace;
-	struct drgn_stack_frame frame;
+	size_t i;
 } StackFrame;
 
 typedef struct {
@@ -116,31 +127,33 @@ typedef struct {
 
 typedef struct {
 	PyObject_HEAD
-	enum {
-		/* obj is the evaluated Type. */
-		DRGNPY_LAZY_TYPE_EVALUATED,
-		/* lazy_type must be evaluated and wrapped. */
-		DRGNPY_LAZY_TYPE_UNEVALUATED,
-		/* obj is a Python callable that should return the Type. */
-		DRGNPY_LAZY_TYPE_CALLABLE,
-	} state;
-	union {
-		PyObject *obj;
-		struct drgn_lazy_type *lazy_type;
-	};
-} LazyType;
+	PyObject *obj;
+	/*
+	 * If DRGNPY_LAZY_OBJECT_EVALUATED, obj is the evaluated Object.
+	 * If DRGNPY_LAZY_OBJECT_CALLABLE, obj is a Python callable that should
+	 * return the Object.
+	 * Otherwise, this must be evaluated and wrapped, and obj is a reference
+	 * required to keep this alive.
+	 */
+	union drgn_lazy_object *lazy_obj;
+} LazyObject;
 
 typedef struct {
-	LazyType lazy_type;
+	LazyObject lazy_obj;
 	PyObject *name;
 	PyObject *bit_offset;
-	PyObject *bit_field_size;
 } TypeMember;
 
 typedef struct {
-	LazyType lazy_type;
+	LazyObject lazy_obj;
 	PyObject *name;
 } TypeParameter;
+
+typedef struct {
+	LazyObject lazy_obj;
+	PyObject *name;
+	PyObject *is_default;
+} TypeTemplateParameter;
 
 extern PyObject *Architecture_class;
 extern PyObject *FindObjectFlags_class;
@@ -149,7 +162,6 @@ extern PyObject *PrimitiveType_class;
 extern PyObject *ProgramFlags_class;
 extern PyObject *Qualifiers_class;
 extern PyObject *TypeKind_class;
-extern PyStructSequence_Desc Register_desc;
 extern PyTypeObject DrgnObject_type;
 extern PyTypeObject DrgnType_type;
 extern PyTypeObject FaultError_type;
@@ -164,7 +176,9 @@ extern PyTypeObject Symbol_type;
 extern PyTypeObject TypeEnumerator_type;
 extern PyTypeObject TypeMember_type;
 extern PyTypeObject TypeParameter_type;
+extern PyTypeObject TypeTemplateParameter_type;
 extern PyObject *MissingDebugInfoError;
+extern PyObject *ObjectAbsentError;
 extern PyObject *OutOfBoundsError;
 
 int add_module_constants(PyObject *m);
@@ -222,7 +236,6 @@ DrgnType *Program_void_type(Program *self, PyObject *args, PyObject *kwds);
 DrgnType *Program_int_type(Program *self, PyObject *args, PyObject *kwds);
 DrgnType *Program_bool_type(Program *self, PyObject *args, PyObject *kwds);
 DrgnType *Program_float_type(Program *self, PyObject *args, PyObject *kwds);
-DrgnType *Program_complex_type(Program *self, PyObject *args, PyObject *kwds);
 DrgnType *Program_struct_type(Program *self, PyObject *args, PyObject *kwds);
 DrgnType *Program_union_type(Program *self, PyObject *args, PyObject *kwds);
 DrgnType *Program_class_type(Program *self, PyObject *args, PyObject *kwds);
@@ -234,14 +247,7 @@ DrgnType *Program_function_type(Program *self, PyObject *args, PyObject *kwds);
 
 int append_string(PyObject *parts, const char *s);
 int append_format(PyObject *parts, const char *format, ...);
-PyObject *byteorder_string(bool little_endian);
-
-struct byteorder_arg {
-	bool allow_none;
-	bool is_none;
-	enum drgn_byte_order value;
-};
-int byteorder_converter(PyObject *o, void *p);
+PyObject *join_strings(PyObject *parts);
 
 struct index_arg {
 	bool allow_none;

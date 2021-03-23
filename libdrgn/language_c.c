@@ -337,12 +337,11 @@ c_declare_variable(struct drgn_qualified_type qualified_type,
 		   struct string_callback *name, size_t indent,
 		   struct string_builder *sb)
 {
-	switch (drgn_type_kind(qualified_type.type)) {
+	SWITCH_ENUM(drgn_type_kind(qualified_type.type),
 	case DRGN_TYPE_VOID:
 	case DRGN_TYPE_INT:
 	case DRGN_TYPE_BOOL:
 	case DRGN_TYPE_FLOAT:
-	case DRGN_TYPE_COMPLEX:
 	case DRGN_TYPE_TYPEDEF:
 		return c_declare_basic(qualified_type, name, indent, sb);
 	case DRGN_TYPE_STRUCT:
@@ -356,8 +355,7 @@ c_declare_variable(struct drgn_qualified_type qualified_type,
 		return c_declare_array(qualified_type, name, indent, sb);
 	case DRGN_TYPE_FUNCTION:
 		return c_declare_function(qualified_type, name, indent, sb);
-	}
-	UNREACHABLE();
+	)
 }
 
 static struct drgn_error *
@@ -383,27 +381,27 @@ c_define_compound(struct drgn_qualified_type qualified_type, size_t indent,
 		return &drgn_enomem;
 
 	for (i = 0; i < num_members; i++) {
-		const char *member_name = members[i].name;
 		struct drgn_qualified_type member_type;
+		uint64_t member_bit_field_size;
+		err = drgn_member_type(&members[i], &member_type,
+				       &member_bit_field_size);
+		if (err)
+			return err;
+
+		const char *member_name = members[i].name;
 		struct string_callback name_cb = {
 			.fn = c_variable_name,
 			.arg = (void *)member_name,
 		};
-
-		err = drgn_member_type(&members[i], &member_type);
-		if (err)
-			return err;
-
 		err = c_declare_variable(member_type,
 					 member_name && member_name[0] ?
 					 &name_cb : NULL, indent + 1, sb);
 		if (err)
 			return err;
-		if (members[i].bit_field_size) {
-			if (!string_builder_appendf(sb, " : %" PRIu64,
-						    members[i].bit_field_size))
+		if (member_bit_field_size &&
+		    !string_builder_appendf(sb, " : %" PRIu64,
+					    member_bit_field_size))
 				return &drgn_enomem;
-		}
 		if (!string_builder_append(sb, ";\n"))
 			return &drgn_enomem;
 	}
@@ -489,12 +487,11 @@ static struct drgn_error *
 c_define_type(struct drgn_qualified_type qualified_type, size_t indent,
 	      struct string_builder *sb)
 {
-	switch (drgn_type_kind(qualified_type.type)) {
+	SWITCH_ENUM(drgn_type_kind(qualified_type.type),
 	case DRGN_TYPE_VOID:
 	case DRGN_TYPE_INT:
 	case DRGN_TYPE_BOOL:
 	case DRGN_TYPE_FLOAT:
-	case DRGN_TYPE_COMPLEX:
 		return c_declare_basic(qualified_type, NULL, indent, sb);
 	case DRGN_TYPE_STRUCT:
 	case DRGN_TYPE_UNION:
@@ -511,8 +508,7 @@ c_define_type(struct drgn_qualified_type qualified_type, size_t indent,
 	case DRGN_TYPE_FUNCTION:
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "function type cannot be formatted");
-	}
-	UNREACHABLE();
+	)
 }
 
 static struct drgn_error *
@@ -708,8 +704,8 @@ c_format_int_object(const struct drgn_object *obj,
 		return NULL;
 	}
 
-	switch (obj->kind) {
-	case DRGN_OBJECT_SIGNED: {
+	switch (obj->encoding) {
+	case DRGN_OBJECT_ENCODING_SIGNED: {
 		int64_t svalue;
 
 		err = drgn_object_read_signed(obj, &svalue);
@@ -719,7 +715,7 @@ c_format_int_object(const struct drgn_object *obj,
 			return &drgn_enomem;
 		return NULL;
 	}
-	case DRGN_OBJECT_UNSIGNED: {
+	case DRGN_OBJECT_ENCODING_UNSIGNED: {
 		uint64_t uvalue;
 
 		err = drgn_object_read_unsigned(obj, &uvalue);
@@ -795,7 +791,7 @@ static struct drgn_error *c_format_initializer(struct drgn_program *prog,
 		size_t initializer_start;
 
 		err = iter->next(iter, &obj, &initializer_flags);
-		if (err && err->code == DRGN_ERROR_STOP)
+		if (err == &drgn_stop)
 			break;
 		else if (err)
 			goto out;
@@ -900,7 +896,7 @@ static struct drgn_error *c_format_initializer(struct drgn_program *prog,
 		size_t newline, designation_start, line_columns;
 
 		err = iter->next(iter, &obj, &initializer_flags);
-		if (err && err->code == DRGN_ERROR_STOP)
+		if (err == &drgn_stop)
 			break;
 		else if (err)
 			goto out;
@@ -1011,26 +1007,24 @@ compound_initializer_iter_next(struct initializer_iter *iter_,
 	struct drgn_error *err;
 	struct compound_initializer_iter *iter =
 		container_of(iter_, struct compound_initializer_iter, iter);
-	struct compound_initializer_state *top;
-	uint64_t bit_offset;
-	struct drgn_type_member *member;
-	struct drgn_qualified_type member_type;
 
 	for (;;) {
-		struct compound_initializer_state *new;
-
 		if (!iter->stack.size)
 			return &drgn_stop;
 
-		top = &iter->stack.data[iter->stack.size - 1];
+		struct compound_initializer_state *top =
+			&iter->stack.data[iter->stack.size - 1];
 		if (top->member == top->end) {
 			iter->stack.size--;
 			continue;
 		}
 
-		bit_offset = top->bit_offset;
-		member = top->member++;
-		err = drgn_member_type(member, &member_type);
+		uint64_t bit_offset = top->bit_offset;
+		struct drgn_type_member *member = top->member++;
+		struct drgn_qualified_type member_type;
+		uint64_t member_bit_field_size;
+		err = drgn_member_type(member, &member_type,
+				       &member_bit_field_size);
 		if (err)
 			return err;
 
@@ -1045,7 +1039,7 @@ compound_initializer_iter_next(struct initializer_iter *iter_,
 		    !drgn_type_has_members(member_type.type)) {
 			err = drgn_object_slice(obj_ret, iter->obj, member_type,
 						bit_offset + member->bit_offset,
-						member->bit_field_size);
+						member_bit_field_size);
 			if (err)
 				return err;
 
@@ -1064,7 +1058,8 @@ compound_initializer_iter_next(struct initializer_iter *iter_,
 			break;
 		}
 
-		new = compound_initializer_stack_append_entry(&iter->stack);
+		struct compound_initializer_state *new =
+			compound_initializer_stack_append_entry(&iter->stack);
 		if (!new)
 			return &drgn_enomem;
 		new->member = drgn_type_members(member_type.type);
@@ -1110,19 +1105,6 @@ c_format_compound_object(const struct drgn_object *obj,
 			 struct string_builder *sb)
 {
 	struct drgn_error *err;
-	struct compound_initializer_iter iter = {
-		.iter = {
-			.next = compound_initializer_iter_next,
-			.reset = compound_initializer_iter_reset,
-			.append_designation =
-				flags & DRGN_FORMAT_OBJECT_MEMBER_NAMES ?
-				compound_initializer_append_designation : NULL,
-		},
-		.obj = obj,
-		.flags = flags,
-		.member_flags = drgn_member_format_object_flags(flags),
-	};
-	struct compound_initializer_state *new;
 
 	if (!drgn_type_is_complete(underlying_type)) {
 		const char *keyword;
@@ -1145,8 +1127,21 @@ c_format_compound_object(const struct drgn_object *obj,
 					 keyword);
 	}
 
-	compound_initializer_stack_init(&iter.stack);
-	new = compound_initializer_stack_append_entry(&iter.stack);
+	struct compound_initializer_iter iter = {
+		.iter = {
+			.next = compound_initializer_iter_next,
+			.reset = compound_initializer_iter_reset,
+			.append_designation =
+				flags & DRGN_FORMAT_OBJECT_MEMBER_NAMES ?
+				compound_initializer_append_designation : NULL,
+		},
+		.obj = obj,
+		.stack = VECTOR_INIT,
+		.flags = flags,
+		.member_flags = drgn_member_format_object_flags(flags),
+	};
+	struct compound_initializer_state *new =
+		compound_initializer_stack_append_entry(&iter.stack);
 	if (!new) {
 		err = &drgn_enomem;
 		goto out;
@@ -1164,22 +1159,22 @@ c_format_compound_object(const struct drgn_object *obj,
 		       DRGN_FORMAT_OBJECT_IMPLICIT_MEMBERS)) &&
 	    new->member < new->end) {
 		struct drgn_object member;
-
 		drgn_object_init(&member, drgn_object_program(obj));
 		do {
 			struct drgn_qualified_type member_type;
-			bool zero;
-
-			err = drgn_member_type(&new->end[-1], &member_type);
+			uint64_t member_bit_field_size;
+			err = drgn_member_type(&new->end[-1], &member_type,
+					       &member_bit_field_size);
 			if (err)
 				break;
 
 			err = drgn_object_slice(&member, obj, member_type,
 						new->end[-1].bit_offset,
-						new->end[-1].bit_field_size);
+						member_bit_field_size);
 			if (err)
 				break;
 
+			bool zero;
 			err = drgn_object_is_zero(&member, &zero);
 			if (err)
 				break;
@@ -1456,18 +1451,15 @@ c_format_array_object(const struct drgn_object *obj,
 
 	if ((flags & DRGN_FORMAT_OBJECT_STRING) && iter.length &&
 	    is_character_type(iter.element_type.type)) {
-		if (obj->is_reference) {
-			return c_format_string(&drgn_object_program(obj)->reader,
-					       obj->reference.address,
-					       iter.length, sb);
-		} else {
+		SWITCH_ENUM(obj->kind,
+		case DRGN_OBJECT_VALUE: {
 			const unsigned char *buf;
 			uint64_t size, i;
 
 			if (!string_builder_appendc(sb, '"'))
 				return &drgn_enomem;
 			buf = (const unsigned char *)drgn_object_buffer(obj);
-			size = drgn_buffer_object_size(obj);
+			size = drgn_object_size(obj);
 			for (i = 0; i < size; i++) {
 				if (buf[i] == '\0')
 					break;
@@ -1480,6 +1472,11 @@ c_format_array_object(const struct drgn_object *obj,
 				return &drgn_enomem;
 			return NULL;
 		}
+		case DRGN_OBJECT_REFERENCE:
+			return c_format_string(&drgn_object_program(obj)->reader,
+					       obj->address, iter.length, sb);
+		case DRGN_OBJECT_ABSENT:
+		)
 	}
 
 	err = drgn_type_bit_size(iter.element_type.type,
@@ -1532,12 +1529,8 @@ static struct drgn_error *
 c_format_function_object(const struct drgn_object *obj,
 			 struct string_builder *sb)
 {
-	/* Function values currently aren't possible anyways. */
-	if (!obj->is_reference) {
-		return drgn_error_create(DRGN_ERROR_TYPE,
-					 "cannot format function value");
-	}
-	if (!string_builder_appendf(sb, "0x%" PRIx64, obj->reference.address))
+	assert(obj->kind == DRGN_OBJECT_REFERENCE);
+	if (!string_builder_appendf(sb, "0x%" PRIx64, obj->address))
 		return &drgn_enomem;
 	return NULL;
 }
@@ -1551,11 +1544,17 @@ c_format_object_impl(const struct drgn_object *obj, size_t indent,
 	struct drgn_error *err;
 	struct drgn_type *underlying_type = drgn_underlying_type(obj->type);
 
+	if (drgn_type_kind(underlying_type) == DRGN_TYPE_VOID) {
+		return drgn_error_create(DRGN_ERROR_TYPE,
+					 "cannot format void object");
+	}
+
 	/*
 	 * Pointers are special because they can have an asterisk prefix if
 	 * we're dereferencing them.
 	 */
-	if (drgn_type_kind(underlying_type) == DRGN_TYPE_POINTER) {
+	if (drgn_type_kind(underlying_type) == DRGN_TYPE_POINTER &&
+	    obj->kind != DRGN_OBJECT_ABSENT) {
 		return c_format_pointer_object(obj, underlying_type, indent,
 					       one_line_columns,
 					       multi_line_columns, flags, sb);
@@ -1578,18 +1577,18 @@ c_format_object_impl(const struct drgn_object *obj, size_t indent,
 		    one_line_columns = 0;
 	}
 
-	switch (drgn_type_kind(underlying_type)) {
-	case DRGN_TYPE_VOID:
-		return drgn_error_create(DRGN_ERROR_TYPE,
-					 "cannot format void object");
+	if (obj->kind == DRGN_OBJECT_ABSENT) {
+		if (!string_builder_append(sb, "<absent>"))
+			return &drgn_enomem;
+		return NULL;
+	}
+
+	SWITCH_ENUM(drgn_type_kind(underlying_type),
 	case DRGN_TYPE_INT:
 	case DRGN_TYPE_BOOL:
 		return c_format_int_object(obj, flags, sb);
 	case DRGN_TYPE_FLOAT:
 		return c_format_float_object(obj, sb);
-	case DRGN_TYPE_COMPLEX:
-		return drgn_error_format(DRGN_ERROR_TYPE,
-					 "complex object formatting is not implemented");
 	case DRGN_TYPE_STRUCT:
 	case DRGN_TYPE_UNION:
 	case DRGN_TYPE_CLASS:
@@ -1604,9 +1603,10 @@ c_format_object_impl(const struct drgn_object *obj, size_t indent,
 					     multi_line_columns, flags, sb);
 	case DRGN_TYPE_FUNCTION:
 		return c_format_function_object(obj, sb);
-	default:
-		UNREACHABLE();
-	}
+	case DRGN_TYPE_VOID:
+	case DRGN_TYPE_TYPEDEF:
+	case DRGN_TYPE_POINTER:
+	)
 }
 
 struct drgn_error *c_format_object(const struct drgn_object *obj,
@@ -1690,7 +1690,7 @@ DEFINE_HASH_MAP(c_keyword_map, struct string, int, string_hash_pair, string_eq)
 
 static struct c_keyword_map c_keywords = HASH_TABLE_INIT;
 
-__attribute__((constructor(101)))
+__attribute__((__constructor__(101)))
 static void c_keywords_init(void)
 {
 	for (int i = MIN_KEYWORD_TOKEN; i <= MAX_KEYWORD_TOKEN; i++) {
@@ -1706,7 +1706,7 @@ static void c_keywords_init(void)
 	}
 }
 
-__attribute__((destructor(101)))
+__attribute__((__destructor__(101)))
 static void c_keywords_deinit(void)
 {
 	c_keyword_map_deinit(&c_keywords);
@@ -2488,10 +2488,11 @@ c_type_from_declarator(struct drgn_program *prog,
 	}
 
 	if (declarator->kind == C_TOKEN_ASTERISK) {
-		uint8_t word_size;
-		err = drgn_program_word_size(prog, &word_size);
+		uint8_t address_size;
+		err = drgn_program_address_size(prog, &address_size);
 		if (!err) {
-			err = drgn_pointer_type_create(prog, *ret, word_size,
+			err = drgn_pointer_type_create(prog, *ret, address_size,
+						       DRGN_PROGRAM_ENDIAN,
 						       drgn_type_language(ret->type),
 						       &ret->type);
 		}
@@ -2589,24 +2590,25 @@ struct drgn_error *c_bit_offset(struct drgn_program *prog,
 		case INT_MIN:
 		case C_TOKEN_DOT:
 			if (token.kind == C_TOKEN_IDENTIFIER) {
-				struct drgn_member_value *member;
-				struct drgn_qualified_type member_type;
-
-				err = drgn_program_find_member(prog, type,
-							       token.value,
-							       token.len,
-							       &member);
+				struct drgn_type_member *member;
+				uint64_t member_bit_offset;
+				err = drgn_type_find_member_len(type,
+								token.value,
+								token.len,
+								&member,
+								&member_bit_offset);
 				if (err)
 					goto out;
 				if (__builtin_add_overflow(bit_offset,
-							   member->bit_offset,
+							   member_bit_offset,
 							   &bit_offset)) {
 					err = drgn_error_create(DRGN_ERROR_OVERFLOW,
 								"offset is too large");
 					goto out;
 				}
-				err = drgn_lazy_type_evaluate(member->type,
-							      &member_type);
+				struct drgn_qualified_type member_type;
+				err = drgn_member_type(member, &member_type,
+						       NULL);
 				if (err)
 					goto out;
 				type = member_type.type;
@@ -2812,7 +2814,7 @@ static bool c_can_represent_all_values(struct drgn_type *type1,
 }
 
 static struct drgn_error *c_integer_promotions(struct drgn_program *prog,
-					       struct drgn_object_type *type)
+					       struct drgn_operand_type *type)
 {
 	struct drgn_error *err;
 	enum drgn_primitive_type primitive;
@@ -2942,9 +2944,9 @@ c_corresponding_unsigned_type(struct drgn_program *prog,
 }
 
 static struct drgn_error *c_common_real_type(struct drgn_program *prog,
-					     struct drgn_object_type *type1,
-					     struct drgn_object_type *type2,
-					     struct drgn_object_type *ret)
+					     struct drgn_operand_type *type1,
+					     struct drgn_operand_type *type2,
+					     struct drgn_operand_type *ret)
 {
 	struct drgn_error *err;
 	enum drgn_primitive_type primitive1, primitive2;
@@ -3132,23 +3134,24 @@ ret2:
 }
 
 static struct drgn_error *c_operand_type(const struct drgn_object *obj,
-					 struct drgn_object_type *type_ret,
+					 struct drgn_operand_type *type_ret,
 					 bool *is_pointer_ret,
 					 uint64_t *referenced_size_ret)
 {
 	struct drgn_error *err;
 
-	*type_ret = drgn_object_type(obj);
+	*type_ret = drgn_object_operand_type(obj);
 	switch (drgn_type_kind(type_ret->underlying_type)) {
 	case DRGN_TYPE_ARRAY: {
-		uint8_t word_size;
-		err = drgn_program_word_size(drgn_object_program(obj),
-					     &word_size);
+		uint8_t address_size;
+		err = drgn_program_address_size(drgn_object_program(obj),
+						&address_size);
 		if (err)
 			return err;
 		err = drgn_pointer_type_create(drgn_object_program(obj),
 					       drgn_type_type(type_ret->underlying_type),
-					       word_size,
+					       address_size,
+					       DRGN_PROGRAM_ENDIAN,
 					       drgn_type_language(type_ret->underlying_type),
 					       &type_ret->type);
 		if (err)
@@ -3161,13 +3164,14 @@ static struct drgn_error *c_operand_type(const struct drgn_object *obj,
 			.type = type_ret->underlying_type,
 			.qualifiers = type_ret->qualifiers,
 		};
-		uint8_t word_size;
-		err = drgn_program_word_size(drgn_object_program(obj),
-					     &word_size);
+		uint8_t address_size;
+		err = drgn_program_address_size(drgn_object_program(obj),
+						&address_size);
 		if (err)
 			return err;
 		err = drgn_pointer_type_create(drgn_object_program(obj),
-					       function_type, word_size,
+					       function_type, address_size,
+					       DRGN_PROGRAM_ENDIAN,
 					       drgn_type_language(type_ret->underlying_type),
 					       &type_ret->type);
 		if (err)
@@ -3176,19 +3180,20 @@ static struct drgn_error *c_operand_type(const struct drgn_object *obj,
 		break;
 	}
 	default:
+		err = drgn_type_with_byte_order(&type_ret->type,
+						&type_ret->underlying_type,
+						DRGN_PROGRAM_ENDIAN);
+		if (err)
+			return err;
 		break;
 	}
 	type_ret->qualifiers = 0;
 
 	if (is_pointer_ret) {
-		struct drgn_type *type;
-
-		type = type_ret->underlying_type;
+		struct drgn_type *type = type_ret->underlying_type;
 		*is_pointer_ret = drgn_type_kind(type) == DRGN_TYPE_POINTER;
 		if (*is_pointer_ret && referenced_size_ret) {
-			struct drgn_type *referenced_type;
-
-			referenced_type =
+			struct drgn_type *referenced_type =
 				drgn_underlying_type(drgn_type_type(type).type);
 			if (drgn_type_kind(referenced_type) == DRGN_TYPE_VOID) {
 				*referenced_size_ret = 1;
@@ -3208,8 +3213,7 @@ struct drgn_error *c_op_cast(struct drgn_object *res,
 			     const struct drgn_object *obj)
 {
 	struct drgn_error *err;
-	struct drgn_object_type type;
-
+	struct drgn_operand_type type;
 	err = c_operand_type(obj, &type, NULL, NULL);
 	if (err)
 		return err;
@@ -3220,8 +3224,8 @@ struct drgn_error *c_op_cast(struct drgn_object *res,
  * It's too expensive to check that two pointer types are compatible, so we just
  * check that they refer to the same kind of type with equal size.
  */
-static bool c_pointers_similar(const struct drgn_object_type *lhs_type,
-			       const struct drgn_object_type *rhs_type,
+static bool c_pointers_similar(const struct drgn_operand_type *lhs_type,
+			       const struct drgn_operand_type *rhs_type,
 			       uint64_t lhs_size, uint64_t rhs_size)
 {
 	struct drgn_type *lhs_referenced_type, *rhs_referenced_type;
@@ -3259,9 +3263,9 @@ struct drgn_error *c_op_cmp(const struct drgn_object *lhs,
 			    const struct drgn_object *rhs, int *ret)
 {
 	struct drgn_error *err;
-	struct drgn_object_type lhs_type, rhs_type;
-	bool lhs_pointer, rhs_pointer;
 
+	struct drgn_operand_type lhs_type, rhs_type;
+	bool lhs_pointer, rhs_pointer;
 	err = c_operand_type(lhs, &lhs_type, &lhs_pointer, NULL);
 	if (err)
 		return err;
@@ -3274,8 +3278,7 @@ struct drgn_error *c_op_cmp(const struct drgn_object *lhs,
 	} else if (lhs_pointer || rhs_pointer) {
 		goto type_error;
 	} else {
-		struct drgn_object_type type;
-
+		struct drgn_operand_type type;
 		if (!drgn_type_is_arithmetic(lhs_type.underlying_type) ||
 		    !drgn_type_is_arithmetic(rhs_type.underlying_type))
 			goto type_error;
@@ -3296,10 +3299,10 @@ struct drgn_error *c_op_add(struct drgn_object *res,
 			    const struct drgn_object *rhs)
 {
 	struct drgn_error *err;
-	struct drgn_object_type lhs_type, rhs_type;
+
+	struct drgn_operand_type lhs_type, rhs_type;
 	bool lhs_pointer, rhs_pointer;
 	uint64_t lhs_size, rhs_size;
-
 	err = c_operand_type(lhs, &lhs_type, &lhs_pointer, &lhs_size);
 	if (err)
 		return err;
@@ -3316,8 +3319,7 @@ struct drgn_error *c_op_add(struct drgn_object *res,
 			goto type_error;
 		return drgn_op_add_to_pointer(res, &rhs_type, rhs_size, false, rhs, lhs);
 	} else {
-		struct drgn_object_type type;
-
+		struct drgn_operand_type type;
 		if (!drgn_type_is_arithmetic(lhs_type.underlying_type) ||
 		    !drgn_type_is_arithmetic(rhs_type.underlying_type))
 			goto type_error;
@@ -3338,10 +3340,10 @@ struct drgn_error *c_op_sub(struct drgn_object *res,
 			    const struct drgn_object *rhs)
 {
 	struct drgn_error *err;
-	struct drgn_object_type lhs_type, rhs_type;
+
+	struct drgn_operand_type lhs_type, rhs_type;
 	bool lhs_pointer, rhs_pointer;
 	uint64_t lhs_size, rhs_size;
-
 	err = c_operand_type(lhs, &lhs_type, &lhs_pointer, &lhs_size);
 	if (err)
 		return err;
@@ -3350,8 +3352,7 @@ struct drgn_error *c_op_sub(struct drgn_object *res,
 		return err;
 
 	if (lhs_pointer && rhs_pointer) {
-		struct drgn_object_type type = {};
-
+		struct drgn_operand_type type = {};
 		err = drgn_program_find_primitive_type(drgn_object_program(lhs),
 						       DRGN_C_TYPE_PTRDIFF_T,
 						       &type.type);
@@ -3368,8 +3369,7 @@ struct drgn_error *c_op_sub(struct drgn_object *res,
 		return drgn_op_add_to_pointer(res, &lhs_type, lhs_size, true,
 					      lhs, rhs);
 	} else {
-		struct drgn_object_type type;
-
+		struct drgn_operand_type type;
 		if (!drgn_type_is_arithmetic(lhs_type.underlying_type) ||
 		    !drgn_type_is_arithmetic(rhs_type.underlying_type))
 			goto type_error;
@@ -3391,8 +3391,8 @@ struct drgn_error *c_op_##op_name(struct drgn_object *res,			\
 				  const struct drgn_object *rhs)		\
 {										\
 	struct drgn_error *err;							\
-	struct drgn_object_type lhs_type, rhs_type, type;			\
 										\
+	struct drgn_operand_type lhs_type, rhs_type, type;			\
 	err = c_operand_type(lhs, &lhs_type, NULL, NULL);			\
 	if (err)								\
 		return err;							\
@@ -3425,8 +3425,8 @@ struct drgn_error *c_op_##op_name(struct drgn_object *res,			\
 					 const struct drgn_object *rhs)		\
 {										\
 	struct drgn_error *err;							\
-	struct drgn_object_type lhs_type, rhs_type;				\
 										\
+	struct drgn_operand_type lhs_type, rhs_type;				\
 	err = c_operand_type(lhs, &lhs_type, NULL, NULL);			\
 	if (err)								\
 		return err;							\
@@ -3456,8 +3456,8 @@ struct drgn_error *c_op_##op_name(struct drgn_object *res,		\
 					 const struct drgn_object *obj)	\
 {									\
 	struct drgn_error *err;						\
-	struct drgn_object_type type;					\
 									\
+	struct drgn_operand_type type;					\
 	err = c_operand_type(obj, &type, NULL, NULL);			\
 	if (err)							\
 		return err;						\

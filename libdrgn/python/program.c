@@ -11,10 +11,12 @@ DEFINE_HASH_TABLE_FUNCTIONS(pyobjectp_set, ptr_key_hash_pair, scalar_key_eq)
 
 int Program_hold_object(Program *prog, PyObject *obj)
 {
-	if (pyobjectp_set_insert(&prog->objects, &obj, NULL) == -1)
-		return -1;
-	Py_INCREF(obj);
-	return 0;
+	int ret = pyobjectp_set_insert(&prog->objects, &obj, NULL);
+	if (ret > 0) {
+		Py_INCREF(obj);
+		ret = 0;
+	}
+	return ret;
 }
 
 bool Program_hold_reserve(Program *prog, size_t n)
@@ -727,7 +729,6 @@ static StackTrace *Program_stack_trace(Program *self, PyObject *args,
 		return NULL;
 	}
 	ret->trace = trace;
-	ret->prog = self;
 	Py_INCREF(self);
 	return ret;
 }
@@ -911,8 +912,6 @@ static PyMethodDef Program_methods[] = {
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_bool_type_DOC},
 	{"float_type", (PyCFunction)Program_float_type,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_float_type_DOC},
-	{"complex_type", (PyCFunction)Program_complex_type,
-	 METH_VARARGS | METH_KEYWORDS, drgn_Program_complex_type_DOC},
 	{"struct_type", (PyCFunction)Program_struct_type,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_struct_type_DOC},
 	{"union_type", (PyCFunction)Program_union_type,
