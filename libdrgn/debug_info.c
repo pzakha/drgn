@@ -7,6 +7,7 @@
 #include <elfutils/known-dwarf.h>
 #include <elfutils/libdw.h>
 #include <elfutils/libdwelf.h>
+#include <elfutils/version.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gelf.h>
@@ -2466,6 +2467,13 @@ err:
 	drgn_compound_type_builder_deinit(&builder);
 	return err;
 }
+
+#if !_ELFUTILS_PREREQ(0, 175)
+static Elf *dwelf_elf_begin(int fd)
+{
+	return elf_begin(fd, ELF_C_READ_MMAP_PRIVATE, NULL);
+}
+#endif
 
 static struct drgn_error *
 parse_enumerator(Dwarf_Die *die, struct drgn_enum_type_builder *builder,
