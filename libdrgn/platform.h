@@ -10,6 +10,7 @@
 #include "drgn.h"
 #include "util.h"
 
+struct drgn_orc_entry;
 struct drgn_register_state;
 
 struct drgn_register {
@@ -23,6 +24,19 @@ struct drgn_register_layout {
 	uint32_t offset;
 	uint32_t size;
 };
+
+/* ELF section to apply relocations to. */
+struct drgn_relocating_section {
+	char *buf;
+	size_t buf_size;
+	uint64_t addr;
+	bool bswap;
+};
+
+typedef struct drgn_error *
+apply_elf_rela_fn(const struct drgn_relocating_section *relocating,
+		  uint64_t r_offset, uint32_t r_type, int64_t r_addend,
+		  uint64_t sym_value);
 
 /* Page table iterator. */
 struct pgtable_iterator {
@@ -73,6 +87,9 @@ struct drgn_architecture_info {
 	drgn_register_number (*dwarf_regno_to_internal)(uint64_t);
 	/* CFI row containing default rules for DWARF CFI. */
 	struct drgn_cfi_row *default_dwarf_cfi_row;
+	struct drgn_error *(*orc_to_cfi)(const struct drgn_orc_entry *,
+					 struct drgn_cfi_row **, bool *,
+					 drgn_register_number *);
 	/*
 	 * Try to unwind a stack frame if CFI wasn't found. Returns &drgn_stop
 	 * if we couldn't.
@@ -89,6 +106,7 @@ struct drgn_architecture_info {
 							     struct drgn_register_state **);
 	struct drgn_error *(*linux_kernel_get_initial_registers)(const struct drgn_object *,
 								 struct drgn_register_state **);
+	apply_elf_rela_fn *apply_elf_rela;
 	struct drgn_error *(*linux_kernel_get_page_offset)(struct drgn_object *);
 	struct drgn_error *(*linux_kernel_get_vmemmap)(struct drgn_object *);
 	struct drgn_error *(*linux_kernel_live_direct_mapping_fallback)(struct drgn_program *,
