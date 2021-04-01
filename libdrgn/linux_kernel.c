@@ -908,7 +908,7 @@ static struct drgn_error *identify_kernel_elf(Elf *elf,
 
 		scnname = elf_strptr(elf, shstrndx, shdr->sh_name);
 		if (!scnname)
-			continue;
+			return drgn_error_libelf();
 		if (strcmp(scnname, ".gnu.linkonce.this_module") == 0)
 			*this_module_scn_ret = scn;
 		else if (strcmp(scnname, ".modinfo") == 0)
@@ -1012,13 +1012,10 @@ cache_kernel_module_sections(struct kernel_module_iterator *kmod_it, Elf *elf,
 			.key = elf_strptr(elf, shstrndx, shdr->sh_name),
 			.value = scn,
 		};
-		/*
-		 * .init sections are freed once the module is initialized, but
-		 * they remain in the section list. Ignore them so we don't get
-		 * confused if the address gets reused for another module.
-		 */
-		if (!entry.key || strstartswith(entry.key, ".init"))
-			continue;
+		if (!entry.key) {
+			err = drgn_error_libelf();
+			goto out_scn_map;
+		}
 
 		if (elf_scn_name_map_insert(&scn_map, &entry, NULL) == -1) {
 			err = &drgn_enomem;
@@ -1050,15 +1047,24 @@ cache_kernel_module_sections(struct kernel_module_iterator *kmod_it, Elf *elf,
 				err = drgn_error_libelf();
 				break;
 			}
-			uint64_t section_end;
-			if (__builtin_add_overflow(address, shdr->sh_size,
-						   &section_end))
-				section_end = UINT64_MAX;
-			if (address < section_end) {
-				if (address < start)
-					start = address;
-				if (section_end > end)
-					end = section_end;
+			/*
+			 * .init sections are freed once the module is
+			 * initialized, but they remain in the section list.
+			 * Ignore them for the purpose of determining the
+			 * module's address range.
+			 */
+			if (!strstartswith(name, ".init")) {
+				uint64_t section_end;
+				if (__builtin_add_overflow(address,
+							   shdr->sh_size,
+							   &section_end))
+					section_end = UINT64_MAX;
+				if (address < section_end) {
+					if (address < start)
+						start = address;
+					if (section_end > end)
+						end = section_end;
+				}
 			}
 		}
 	}
