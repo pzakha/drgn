@@ -1,5 +1,5 @@
 // Copyright (c) Facebook, Inc. and its affiliates.
-// SPDX-License-Identifier: GPL-3.0+
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <limits.h>
 #include <stdlib.h>
@@ -1041,13 +1041,16 @@ drgn_type_with_byte_order_impl(struct drgn_type **type,
 					    drgn_type_program(*type));
 		size_t num_enumerators =
 			drgn_type_num_enumerators(*type);
-		if (!drgn_type_enumerator_vector_reserve(&builder.enumerators,
-							 num_enumerators)) {
-			drgn_enum_type_builder_deinit(&builder);
-			return &drgn_enomem;
+		if (num_enumerators) {
+			if (!drgn_type_enumerator_vector_reserve(&builder.enumerators,
+								 num_enumerators)) {
+				drgn_enum_type_builder_deinit(&builder);
+				return &drgn_enomem;
+			}
+			memcpy(&builder.enumerators.data,
+			       drgn_type_enumerators(*type),
+			       num_enumerators * sizeof(struct drgn_type_enumerator));
 		}
-		memcpy(&builder.enumerators.data, drgn_type_enumerators(*type),
-		       num_enumerators * sizeof(struct drgn_type_enumerator));
 		err = drgn_enum_type_create(&builder, drgn_type_tag(*type),
 					    compatible_type,
 					    drgn_type_language(*type), type);
