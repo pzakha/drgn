@@ -1,5 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-# SPDX-License-Identifier: GPL-3.0+
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 import ctypes
 import itertools
@@ -320,7 +320,7 @@ class TestMemory(TestCase):
         )
         self.assertRaisesRegex(
             ValueError,
-            "memory read callback returned buffer of length 0 \(expected 8\)",
+            r"memory read callback returned buffer of length 0 \(expected 8\)",
             prog.read,
             0xFFFF0000,
             8,

@@ -1,5 +1,5 @@
 // Copyright (c) Facebook, Inc. and its affiliates.
-// SPDX-License-Identifier: GPL-3.0+
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <assert.h>
 #include <byteswap.h>
@@ -4240,7 +4240,7 @@ drgn_debug_info_find_cfi_in_fde(struct drgn_debug_info_module *module,
 	struct drgn_error *err;
 	struct drgn_dwarf_cie *cie = &module->cies[fde->cie];
 	struct drgn_cfi_row *initial_row =
-		module->platform.arch->default_dwarf_cfi_row;
+		(struct drgn_cfi_row *)module->platform.arch->default_dwarf_cfi_row;
 	err = drgn_eval_dwarf_cfi(module, fde, NULL, unbiased_pc,
 				  cie->initial_instructions,
 				  cie->initial_instructions_size, &initial_row);

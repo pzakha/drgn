@@ -1,5 +1,5 @@
 // Copyright (c) Facebook, Inc. and its affiliates.
-// SPDX-License-Identifier: GPL-3.0+
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
  * @file
@@ -663,18 +663,6 @@ static inline size_t table##_chunk_capacity_scale(struct table##_chunk *chunk)	\
 		uint16_t val;							\
 		memcpy(&val, &chunk->tags[12], 2);				\
 		return val;							\
-	}									\
-}										\
-										\
-static inline void								\
-table##_chunk_set_capacity_scale(struct table##_chunk *chunk,			\
-				 size_t capacity_scale)				\
-{										\
-	if (table##_capacity_scale_bits == 4) {					\
-		chunk->control = (chunk->control & ~0xf) | capacity_scale;	\
-	} else {								\
-		uint16_t val = capacity_scale;					\
-		memcpy(&chunk->tags[12], &val, 2);				\
 	}									\
 }										\
 										\
@@ -1350,7 +1338,7 @@ table##_delete_iterator_hashed(struct table *table, struct table##_iterator it,	
 	}									\
 }										\
 										\
-__attribute__((__always_inline__))						\
+__attribute__((__always_inline__, __unused__))					\
 static inline struct table##_iterator						\
 table##_delete_iterator(struct table *table, struct table##_iterator it)	\
 {										\

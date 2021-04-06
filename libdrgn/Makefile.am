@@ -1,5 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-# SPDX-License-Identifier: GPL-3.0+
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 ACLOCAL_AMFLAGS = -I m4
 
@@ -164,9 +164,3 @@ EXTRA_PROGRAMS = examples/load_debug_info
 
 examples_load_debug_info_SOURCES = examples/load_debug_info.c
 examples_load_debug_info_LDADD = libdrgnimpl.la
-
-CLEANFILES = $(ARCH_INCS) \
-	     drgn.h \
-	     python/constants.c \
-	     python/docstrings.c \
-	     python/docstrings.h

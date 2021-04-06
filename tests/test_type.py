@@ -1,5 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-# SPDX-License-Identifier: GPL-3.0+
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 import operator
 
@@ -862,7 +862,7 @@ class TestType(MockProgramTestCase):
         )
 
         self.assertRaisesRegex(
-            TypeError, "must be _drgn\.Type", self.prog.function_type, None, ()
+            TypeError, r"must be _drgn\.Type", self.prog.function_type, None, ()
         )
         self.assertRaisesRegex(
             TypeError,
