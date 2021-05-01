@@ -258,16 +258,16 @@ class Program:
         """
         ...
     def read_u8(self, address: IntegerLike, physical: bool = False) -> int:
-        ""
+        """ """
         ...
     def read_u16(self, address: IntegerLike, physical: bool = False) -> int:
-        ""
+        """ """
         ...
     def read_u32(self, address: IntegerLike, physical: bool = False) -> int:
-        ""
+        """ """
         ...
     def read_u64(self, address: IntegerLike, physical: bool = False) -> int:
-        ""
+        """ """
         ...
     def read_word(self, address: IntegerLike, physical: bool = False) -> int:
         """
@@ -1952,11 +1952,14 @@ class FaultError(Exception):
     accessing a memory address which is not valid in a program).
     """
 
-    def __init__(self, address: int) -> None:
+    def __init__(self, message: str, address: int) -> None:
         """
+        :param message: :attr:`FaultError.message`
         :param address: :attr:`FaultError.address`
         """
         ...
+    message: str
+    """Error message."""
     address: int
     """Address that couldn't be accessed."""
 
