@@ -12,6 +12,7 @@
 #ifndef DRGN_DEBUG_INFO_H
 #define DRGN_DEBUG_INFO_H
 
+#include <elfutils/libdw.h>
 #include <elfutils/libdwfl.h>
 #include <libelf.h>
 
@@ -64,6 +65,7 @@ enum drgn_debug_info_scn {
 	DRGN_SCN_EH_FRAME,
 	DRGN_SCN_ORC_UNWIND_IP,
 	DRGN_SCN_ORC_UNWIND,
+	DRGN_SCN_DEBUG_LOC,
 
 	DRGN_NUM_DEBUG_SCN_DATA,
 
@@ -200,6 +202,43 @@ drgn_debug_info_buffer_init(struct drgn_debug_info_buffer *buffer,
 	buffer->module = module;
 	buffer->scn = scn;
 }
+
+/**
+ * Find the DWARF DIEs in a @ref drgn_debug_info_module for the scope containing
+ * a given program counter.
+ *
+ * @param[in] module Module containing @p pc.
+ * @param[in] pc Program counter.
+ * @param[out] bias_ret Returned difference between addresses in the loaded
+ * module and addresses in the returned DIEs.
+ * @param[out] dies_ret Returned DIEs. `(*dies_ret)[*length_ret - 1]` is the
+ * innermost DIE containing @p pc, `(*dies_ret)[*length_ret - 2]` is its parent
+ * (which may not contain @p pc itself), `(*dies_ret)[*length_ret - 3]` is its
+ * grandparent, etc. Must be freed with @c free().
+ * @param[out] length_ret Returned length of @p dies_ret.
+ */
+struct drgn_error *
+drgn_debug_info_module_find_dwarf_scopes(struct drgn_debug_info_module *module,
+					 uint64_t pc, uint64_t *bias_ret,
+					 Dwarf_Die **dies_ret,
+					 size_t *length_ret)
+	__attribute__((__nonnull__(1, 3, 4, 5)));
+
+/**
+ * Find the ancestors of a DWARF DIE.
+ *
+ * This finds the parent, grandparent, etc., of a DWARF DIE in the tree of DIEs.
+ *
+ * @param[in] module Module containing @p die.
+ * @param[in] die DIE to find.
+ * @param[out] dies_ret Returned DIEs. `(*dies_ret)[*length_ret]` is the DIE,
+ * `(*dies_ret)[*length_ret - 1]` is its parent, `(*dies_ret)[*length_ret - 2]`
+ * is its grandparent, etc., and `(*dies_ret)[0]` is the top-level unit DIE.
+ * @param[out] length_ret Returned number of ancestors in @p dies_ret.
+ */
+struct drgn_error *drgn_find_die_ancestors(Dwarf_Die *die, Dwarf_Die **dies_ret,
+					  size_t *length_ret)
+	__attribute__((__nonnull__(2, 3)));
 
 struct drgn_debug_info_module_key {
 	const void *build_id;
@@ -378,6 +417,44 @@ drgn_debug_info_find_object(const char *name, size_t name_len,
 			    const char *filename,
 			    enum drgn_find_object_flags flags, void *arg,
 			    struct drgn_object *ret);
+
+/**
+ * Find an object DIE in an array of DWARF scopes.
+ *
+ * @param[in] scopes Array of scopes, from outermost to innermost.
+ * @param[in] num_scopes Number of scopes in @p scopes.
+ * @param[out] die_ret Returned object DIE.
+ * @param[out] type_ret If @p die_ret is a `DW_TAG_enumerator` DIE, its parent.
+ * Otherwise, undefined.
+ */
+struct drgn_error *drgn_find_in_dwarf_scopes(Dwarf_Die *scopes,
+					     size_t num_scopes,
+					     const char *name,
+					     Dwarf_Die *die_ret,
+					     Dwarf_Die *type_ret);
+
+/**
+ * Create a @ref drgn_object from a `Dwarf_Die`.
+ *
+ * @param[in] die Object DIE (e.g., `DW_TAG_subprogram`, `DW_TAG_variable`,
+ * `DW_TAG_formal_parameter`, `DW_TAG_enumerator`,
+ * `DW_TAG_template_value_parameter`).
+ * @param[in] type_die DIE of object's type. If @c NULL, use the `DW_AT_type`
+ * attribute of @p die. If @p die is a `DW_TAG_enumerator` DIE, this should be
+ * its parent.
+ * @param[in] function_die DIE of current function. @c NULL if not in function
+ * context.
+ * @param[in] regs Registers of current stack frame. @c NULL if not in stack
+ * frame context.
+ * @param[out] ret Returned object.
+ */
+struct drgn_error *
+drgn_object_from_dwarf(struct drgn_debug_info *dbinfo,
+		       struct drgn_debug_info_module *module,
+		       Dwarf_Die *die, Dwarf_Die *type_die,
+		       Dwarf_Die *function_die,
+		       const struct drgn_register_state *regs,
+		       struct drgn_object *ret);
 
 /**
  * Get the Call Frame Information in a @ref drgn_debug_info_module at a given

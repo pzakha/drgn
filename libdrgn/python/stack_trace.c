@@ -72,6 +72,89 @@ static void StackFrame_dealloc(StackFrame *self)
 	Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
+static PyObject *StackFrame_str(StackFrame *self)
+{
+	struct drgn_error *err;
+	char *str;
+	err = drgn_format_stack_frame(self->trace->trace, self->i, &str);
+	if (err)
+		return set_drgn_error(err);
+	PyObject *ret = PyUnicode_FromString(str);
+	free(str);
+	return ret;
+}
+
+static DrgnObject *StackFrame_subscript(StackFrame *self, PyObject *key)
+{
+	struct drgn_error *err;
+	Program *prog = container_of(self->trace->trace->prog, Program, prog);
+	if (!PyUnicode_Check(key)) {
+		PyErr_SetObject(PyExc_KeyError, key);
+		return NULL;
+	}
+	const char *name = PyUnicode_AsUTF8(key);
+	if (!name)
+		return NULL;
+	DrgnObject *ret = DrgnObject_alloc(prog);
+	if (!ret)
+		return NULL;
+	bool clear = set_drgn_in_python();
+	err = drgn_stack_frame_find_object(self->trace->trace, self->i, name,
+					   &ret->obj);
+	if (clear)
+		clear_drgn_in_python();
+	if (err) {
+		if (err->code == DRGN_ERROR_LOOKUP) {
+			drgn_error_destroy(err);
+			PyErr_SetObject(PyExc_KeyError, key);
+		} else {
+			set_drgn_error(err);
+		}
+		Py_DECREF(ret);
+		return NULL;
+	}
+	return ret;
+}
+
+static int StackFrame_contains(StackFrame *self, PyObject *key)
+{
+	struct drgn_error *err;
+	if (!PyUnicode_Check(key)) {
+		PyErr_SetObject(PyExc_KeyError, key);
+		return -1;
+	}
+	const char *name = PyUnicode_AsUTF8(key);
+	if (!name)
+		return -1;
+	struct drgn_object tmp;
+	drgn_object_init(&tmp, self->trace->trace->prog);
+	err = drgn_stack_frame_find_object(self->trace->trace, self->i, name,
+					   &tmp);
+	drgn_object_deinit(&tmp);
+	if (!err) {
+		return 1;
+	} else if (err->code == DRGN_ERROR_LOOKUP) {
+		drgn_error_destroy(err);
+		return 0;
+	} else {
+		return -1;
+	}
+}
+
+static PyObject *StackFrame_source(StackFrame *self)
+{
+	int line;
+	int column;
+	const char *filename = drgn_stack_frame_source(self->trace->trace,
+						       self->i, &line, &column);
+	if (!filename) {
+		PyErr_SetString(PyExc_LookupError,
+				"source code location not available");
+		return NULL;
+	}
+	return Py_BuildValue("sii", filename, line, column);
+}
+
 static PyObject *StackFrame_symbol(StackFrame *self)
 {
 	struct drgn_error *err;
@@ -148,6 +231,20 @@ static PyObject *StackFrame_registers(StackFrame *self)
 	return dict;
 }
 
+static PyObject *StackFrame_get_name(StackFrame *self, void *arg)
+{
+	const char *name = drgn_stack_frame_name(self->trace->trace, self->i);
+	if (name)
+		return PyUnicode_FromString(name);
+	else
+		Py_RETURN_NONE;
+}
+
+static PyObject *StackFrame_get_is_inline(StackFrame *self, void *arg)
+{
+	Py_RETURN_BOOL(drgn_stack_frame_is_inline(self->trace->trace, self->i));
+}
+
 static PyObject *StackFrame_get_interrupted(StackFrame *self, void *arg)
 {
 	Py_RETURN_BOOL(drgn_stack_frame_interrupted(self->trace->trace,
@@ -167,6 +264,12 @@ static PyObject *StackFrame_get_pc(StackFrame *self, void *arg)
 }
 
 static PyMethodDef StackFrame_methods[] = {
+	{"__getitem__", (PyCFunction)StackFrame_subscript,
+	 METH_O | METH_COEXIST, drgn_StackFrame___getitem___DOC},
+	{"__contains__", (PyCFunction)StackFrame_contains,
+	 METH_O | METH_COEXIST, drgn_StackFrame___contains___DOC},
+	{"source", (PyCFunction)StackFrame_source, METH_NOARGS,
+	 drgn_StackFrame_source_DOC},
 	{"symbol", (PyCFunction)StackFrame_symbol, METH_NOARGS,
 	 drgn_StackFrame_symbol_DOC},
 	{"register", (PyCFunction)StackFrame_register,
@@ -177,10 +280,21 @@ static PyMethodDef StackFrame_methods[] = {
 };
 
 static PyGetSetDef StackFrame_getset[] = {
+	{"name", (getter)StackFrame_get_name, NULL, drgn_StackFrame_name_DOC},
+	{"is_inline", (getter)StackFrame_get_is_inline, NULL,
+	 drgn_StackFrame_is_inline_DOC},
 	{"interrupted", (getter)StackFrame_get_interrupted, NULL,
 	 drgn_StackFrame_interrupted_DOC},
 	{"pc", (getter)StackFrame_get_pc, NULL, drgn_StackFrame_pc_DOC},
 	{},
+};
+
+static PyMappingMethods StackFrame_as_mapping = {
+	.mp_subscript = (binaryfunc)StackFrame_subscript,
+};
+
+static PySequenceMethods StackFrame_as_sequence = {
+	.sq_contains = (objobjproc)StackFrame_contains,
 };
 
 PyTypeObject StackFrame_type = {
@@ -188,6 +302,9 @@ PyTypeObject StackFrame_type = {
 	.tp_name = "_drgn.StackFrame",
 	.tp_basicsize = sizeof(StackFrame),
 	.tp_dealloc = (destructor)StackFrame_dealloc,
+	.tp_as_sequence = &StackFrame_as_sequence,
+	.tp_as_mapping = &StackFrame_as_mapping,
+	.tp_str = (reprfunc)StackFrame_str,
 	.tp_flags = Py_TPFLAGS_DEFAULT,
 	.tp_doc = drgn_StackFrame_DOC,
 	.tp_methods = StackFrame_methods,
