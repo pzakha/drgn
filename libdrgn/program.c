@@ -23,6 +23,7 @@
 #include "language.h"
 #include "linux_kernel.h"
 #include "memory_reader.h"
+#include "minmax.h"
 #include "object_index.h"
 #include "program.h"
 #include "symbol.h"
@@ -141,8 +142,16 @@ drgn_program_add_memory_segment(struct drgn_program *prog, uint64_t address,
 				uint64_t size, drgn_memory_read_fn read_fn,
 				void *arg, bool physical)
 {
-	return drgn_memory_reader_add_segment(&prog->reader, address, size,
-					      read_fn, arg, physical);
+	uint64_t address_mask;
+	struct drgn_error *err = drgn_program_address_mask(prog, &address_mask);
+	if (err)
+		return err;
+	if (size == 0 || address > address_mask)
+		return NULL;
+	uint64_t max_address = address + min(size - 1, address_mask - address);
+	return drgn_memory_reader_add_segment(&prog->reader, address,
+					      max_address, read_fn, arg,
+					      physical);
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
@@ -191,7 +200,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 {
 	struct drgn_error *err;
 	GElf_Ehdr ehdr_mem, *ehdr;
-	struct drgn_platform platform;
+	bool had_platform;
 	bool is_64_bit, is_kdump;
 	size_t phnum, i;
 	size_t num_file_segments, j;
@@ -232,13 +241,17 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 					"not an ELF core file");
 		goto out_elf;
 	}
-
-	drgn_platform_from_elf(ehdr, &platform);
+	had_platform = prog->has_platform;
+	if (!had_platform) {
+		struct drgn_platform platform;
+		drgn_platform_from_elf(ehdr, &platform);
+		drgn_program_set_platform(prog, &platform);
+	}
 	is_64_bit = ehdr->e_ident[EI_CLASS] == ELFCLASS64;
 
 	if (elf_getphdrnum(prog->core, &phnum) != 0) {
 		err = drgn_error_libelf();
-		goto out_elf;
+		goto out_platform;
 	}
 
 	/*
@@ -252,7 +265,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 		phdr = gelf_getphdr(prog->core, i, &phdr_mem);
 		if (!phdr) {
 			err = drgn_error_libelf();
-			goto out_elf;
+			goto out_platform;
 		}
 
 		if (phdr->p_type == PT_LOAD) {
@@ -270,7 +283,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 						    note_header_type(phdr));
 			if (!data) {
 				err = drgn_error_libelf();
-				goto out_elf;
+				goto out_platform;
 			}
 
 			offset = 0;
@@ -310,7 +323,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 		if (fstatfs(prog->core_fd, &fs) == -1) {
 			err = drgn_error_create_os("fstatfs", errno, path);
 			if (err)
-				goto out_elf;
+				goto out_platform;
 		}
 		is_proc_kcore = fs.f_type == 0x9fa0; /* PROC_SUPER_MAGIC */
 	} else {
@@ -325,7 +338,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 		if (env && atoi(env)) {
 			err = drgn_program_set_kdump(prog);
 			if (err)
-				goto out_elf;
+				goto out_platform;
 			return NULL;
 		}
 	}
@@ -334,18 +347,16 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 					   sizeof(*prog->file_segments));
 	if (!prog->file_segments) {
 		err = &drgn_enomem;
-		goto out_elf;
+		goto out_platform;
 	}
 
 	if ((is_proc_kcore || vmcoreinfo_note) &&
-	    platform.arch->linux_kernel_pgtable_iterator_next) {
+	    prog->platform.arch->linux_kernel_pgtable_iterator_next) {
 		/*
 		 * Try to read any memory that isn't in the core dump via the
 		 * page table.
 		 */
-		err = drgn_program_add_memory_segment(prog, 0,
-						      is_64_bit ?
-						      UINT64_MAX : UINT32_MAX,
+		err = drgn_program_add_memory_segment(prog, 0, UINT64_MAX,
 						      read_memory_via_pgtable,
 						      prog, false);
 		if (err)
@@ -397,12 +408,11 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 	 * pass, as we may need to read virtual memory to determine the mapping.
 	 */
 	if (is_proc_kcore && !have_phys_addrs &&
-	    platform.arch->linux_kernel_live_direct_mapping_fallback) {
+	    prog->platform.arch->linux_kernel_live_direct_mapping_fallback) {
 		uint64_t direct_mapping, direct_mapping_size;
-
-		err = platform.arch->linux_kernel_live_direct_mapping_fallback(prog,
-									       &direct_mapping,
-									       &direct_mapping_size);
+		err = prog->platform.arch->linux_kernel_live_direct_mapping_fallback(prog,
+										     &direct_mapping,
+										     &direct_mapping_size);
 		if (err)
 			goto out_segments;
 
@@ -445,8 +455,7 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 
 	if (is_proc_kcore) {
 		if (!vmcoreinfo_note) {
-			err = read_vmcoreinfo_fallback(&prog->reader,
-						       &prog->vmcoreinfo);
+			err = read_vmcoreinfo_fallback(prog);
 			if (err)
 				goto out_segments;
 		}
@@ -467,7 +476,6 @@ drgn_program_set_core_dump(struct drgn_program *prog, const char *path)
 			prog->lang = &drgn_language_c;
 	}
 
-	drgn_program_set_platform(prog, &platform);
 	return NULL;
 
 out_segments:
@@ -475,6 +483,8 @@ out_segments:
 	drgn_memory_reader_init(&prog->reader);
 	free(prog->file_segments);
 	prog->file_segments = NULL;
+out_platform:
+	prog->has_platform = had_platform;
 out_elf:
 	elf_end(prog->core);
 	prog->core = NULL;
@@ -494,16 +504,19 @@ LIBDRGN_PUBLIC struct drgn_error *
 drgn_program_set_pid(struct drgn_program *prog, pid_t pid)
 {
 	struct drgn_error *err;
-	char buf[64];
 
 	err = drgn_program_check_initialized(prog);
 	if (err)
 		return err;
 
+	char buf[64];
 	sprintf(buf, "/proc/%ld/mem", (long)pid);
 	prog->core_fd = open(buf, O_RDONLY);
 	if (prog->core_fd == -1)
 		return drgn_error_create_os("open", errno, buf);
+
+	bool had_platform = prog->has_platform;
+	drgn_program_set_platform(prog, &drgn_host_platform);
 
 	prog->file_segments = malloc(sizeof(*prog->file_segments));
 	if (!prog->file_segments) {
@@ -522,7 +535,6 @@ drgn_program_set_pid(struct drgn_program *prog, pid_t pid)
 
 	prog->pid = pid;
 	prog->flags |= DRGN_PROGRAM_IS_LIVE;
-	drgn_program_set_platform(prog, &drgn_host_platform);
 	return NULL;
 
 out_segments:
@@ -531,6 +543,7 @@ out_segments:
 	free(prog->file_segments);
 	prog->file_segments = NULL;
 out_fd:
+	prog->has_platform = had_platform;
 	close(prog->core_fd);
 	prog->core_fd = -1;
 	return err;
@@ -939,8 +952,23 @@ LIBDRGN_PUBLIC struct drgn_error *
 drgn_program_read_memory(struct drgn_program *prog, void *buf, uint64_t address,
 			 size_t count, bool physical)
 {
-	return drgn_memory_reader_read(&prog->reader, buf, address, count,
-				       physical);
+	uint64_t address_mask;
+	struct drgn_error *err = drgn_program_address_mask(prog, &address_mask);
+	if (err)
+		return err;
+	char *p = buf;
+	address &= address_mask;
+	while (count > 0) {
+		size_t n = min((uint64_t)(count - 1), address_mask - address) + 1;
+		err = drgn_memory_reader_read(&prog->reader, p, address, n,
+					      physical);
+		if (err)
+			return err;
+		p += n;
+		address = 0;
+		count -= n;
+	}
+	return NULL;
 }
 
 DEFINE_VECTOR(char_vector, char)
@@ -949,9 +977,13 @@ LIBDRGN_PUBLIC struct drgn_error *
 drgn_program_read_c_string(struct drgn_program *prog, uint64_t address,
 			   bool physical, size_t max_size, char **ret)
 {
-	struct drgn_error *err;
+	uint64_t address_mask;
+	struct drgn_error *err = drgn_program_address_mask(prog, &address_mask);
+	if (err)
+		return err;
 	struct char_vector str = VECTOR_INIT;
 	for (;;) {
+		address &= address_mask;
 		char *c = char_vector_append_entry(&str);
 		if (!c) {
 			char_vector_deinit(&str);
@@ -981,8 +1013,8 @@ LIBDRGN_PUBLIC struct drgn_error *
 drgn_program_read_u8(struct drgn_program *prog, uint64_t address, bool physical,
 		     uint8_t *ret)
 {
-	return drgn_memory_reader_read(&prog->reader, ret, address,
-				       sizeof(*ret), physical);
+	return drgn_program_read_memory(prog, ret, address, sizeof(*ret),
+					physical);
 }
 
 #define DEFINE_PROGRAM_READ_U(n)						\
@@ -995,8 +1027,8 @@ drgn_program_read_u##n(struct drgn_program *prog, uint64_t address,		\
 	if (err)								\
 		return err;							\
 	uint##n##_t tmp;							\
-	err = drgn_memory_reader_read(&prog->reader, &tmp, address,		\
-				      sizeof(tmp), physical);			\
+	err = drgn_program_read_memory(prog, &tmp, address, sizeof(tmp),	\
+				       physical);				\
 	if (err)								\
 		return err;							\
 	if (bswap)								\
@@ -1023,8 +1055,8 @@ drgn_program_read_word(struct drgn_program *prog, uint64_t address,
 		return err;
 	if (is_64_bit) {
 		uint64_t tmp;
-		err = drgn_memory_reader_read(&prog->reader, &tmp, address,
-					      sizeof(tmp), physical);
+		err = drgn_program_read_memory(prog, &tmp, address, sizeof(tmp),
+					       physical);
 		if (err)
 			return err;
 		if (bswap)
@@ -1032,8 +1064,8 @@ drgn_program_read_word(struct drgn_program *prog, uint64_t address,
 		*ret = tmp;
 	} else {
 		uint32_t tmp;
-		err = drgn_memory_reader_read(&prog->reader, &tmp, address,
-					      sizeof(tmp), physical);
+		err = drgn_program_read_memory(prog, &tmp, address, sizeof(tmp),
+					       physical);
 		if (err)
 			return err;
 		if (bswap)

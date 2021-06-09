@@ -10,7 +10,6 @@
 #include "drgn.h"
 #include "error.h"
 #include "language.h"
-#include "memory_reader.h"
 #include "minmax.h"
 #include "object.h"
 #include "program.h"
@@ -233,7 +232,12 @@ static void drgn_value_deserialize(union drgn_value *value, const void *buf,
 		int64_t svalue;
 		uint64_t uvalue;
 		double fvalue64;
-		float fvalue32;
+		struct {
+#if !HOST_LITTLE_ENDIAN
+			float pad;
+#endif
+			float fvalue32;
+		};
 	} tmp;
 
 	tmp.uvalue = deserialize_bits(buf, bit_offset, bit_size, little_endian);
@@ -314,7 +318,7 @@ drgn_object_set_from_buffer(struct drgn_object *res,
 						    bit_offset);
 }
 
-static struct drgn_error *
+struct drgn_error *
 drgn_object_set_reference_internal(struct drgn_object *res,
 				   const struct drgn_object_type *type,
 				   uint64_t address, uint64_t bit_offset)
@@ -532,8 +536,8 @@ drgn_object_read_reference(const struct drgn_object *obj,
 			if (!dst)
 				return &drgn_enomem;
 		}
-		err = drgn_memory_reader_read(&drgn_object_program(obj)->reader,
-					      dst, obj->address, size, false);
+		err = drgn_program_read_memory(drgn_object_program(obj), dst,
+					       obj->address, size, false);
 		if (err) {
 			if (dst != value->ibuf)
 				free(dst);
@@ -548,9 +552,8 @@ drgn_object_read_reference(const struct drgn_object *obj,
 		uint64_t read_size = drgn_value_size(bit_offset + bit_size);
 		char buf[9];
 		assert(read_size <= sizeof(buf));
-		err = drgn_memory_reader_read(&drgn_object_program(obj)->reader,
-					      buf, obj->address, read_size,
-					      false);
+		err = drgn_program_read_memory(drgn_object_program(obj), buf,
+					       obj->address, read_size, false);
 		if (err)
 			return err;
 		drgn_value_deserialize(value, buf, bit_offset, obj->encoding,

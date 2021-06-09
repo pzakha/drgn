@@ -19,6 +19,16 @@
 #include "siphash.h"
 #include "util.h"
 
+struct drgn_dwarf_index_pending_cu {
+	struct drgn_debug_info_module *module;
+	const char *buf;
+	size_t len;
+	bool is_64_bit;
+	enum drgn_debug_info_scn scn;
+};
+
+DEFINE_VECTOR_FUNCTIONS(drgn_dwarf_index_pending_cu_vector)
+
 /*
  * The DWARF abbreviation table gets translated into a series of instructions.
  * An instruction <= INSN_MAX_SKIP indicates a number of bytes to be skipped
@@ -30,7 +40,7 @@
  * set to zero if the tag is not of interest); see DIE_FLAG_*.
  */
 enum {
-	INSN_MAX_SKIP = 226,
+	INSN_MAX_SKIP = 219,
 	ATTRIB_BLOCK1,
 	ATTRIB_BLOCK2,
 	ATTRIB_BLOCK4,
@@ -60,7 +70,14 @@ enum {
 	ATTRIB_SPECIFICATION_REF_UDATA,
 	ATTRIB_SPECIFICATION_REF_ADDR4,
 	ATTRIB_SPECIFICATION_REF_ADDR8,
-	ATTRIB_MAX_INSN = ATTRIB_SPECIFICATION_REF_ADDR8,
+	ATTRIB_INDIRECT,
+	ATTRIB_SIBLING_INDIRECT,
+	ATTRIB_NAME_INDIRECT,
+	ATTRIB_STMT_LIST_INDIRECT,
+	ATTRIB_DECL_FILE_INDIRECT,
+	ATTRIB_DECLARATION_INDIRECT,
+	ATTRIB_SPECIFICATION_INDIRECT,
+	ATTRIB_MAX_INSN = ATTRIB_SPECIFICATION_INDIRECT,
 };
 
 enum {
@@ -82,6 +99,7 @@ struct drgn_dwarf_index_cu {
 	uint8_t version;
 	uint8_t address_size;
 	bool is_64_bit;
+	bool is_type_unit;
 	/*
 	 * This is indexed on the DWARF abbreviation code minus one. It maps the
 	 * abbreviation code to an index in abbrev_insns where the instruction
@@ -212,22 +230,285 @@ void drgn_dwarf_index_deinit(struct drgn_dwarf_index *dindex)
 	drgn_dwarf_index_namespace_deinit(&dindex->global);
 }
 
-void drgn_dwarf_index_update_begin(struct drgn_dwarf_index_update_state *state,
+bool
+drgn_dwarf_index_update_state_init(struct drgn_dwarf_index_update_state *state,
 				   struct drgn_dwarf_index *dindex)
 {
 	state->dindex = dindex;
-	state->old_cus_size = dindex->cus.size;
-	state->err = NULL;
+	state->max_threads = omp_get_max_threads();
+	state->cus = malloc_array(state->max_threads, sizeof(*state->cus));
+	if (!state->cus)
+		return false;
+	for (size_t i = 0; i < state->max_threads; i++)
+		drgn_dwarf_index_pending_cu_vector_init(&state->cus[i]);
+	return true;
 }
 
-void drgn_dwarf_index_update_cancel(struct drgn_dwarf_index_update_state *state,
-				    struct drgn_error *err)
+void
+drgn_dwarf_index_update_state_deinit(struct drgn_dwarf_index_update_state *state)
 {
-	#pragma omp critical(drgn_dwarf_index_update_cancel)
-	if (state->err)
-		drgn_error_destroy(err);
-	else
-		state->err = err;
+	for (size_t i = 0; i < state->max_threads; i++)
+		drgn_dwarf_index_pending_cu_vector_deinit(&state->cus[i]);
+	free(state->cus);
+}
+
+static struct drgn_error *dw_form_to_insn(struct drgn_dwarf_index_cu *cu,
+					  struct binary_buffer *bb,
+					  uint64_t form, uint8_t *insn_ret)
+{
+	switch (form) {
+	case DW_FORM_addr:
+		*insn_ret = cu->address_size;
+		return NULL;
+	case DW_FORM_data1:
+	case DW_FORM_ref1:
+	case DW_FORM_flag:
+		*insn_ret = 1;
+		return NULL;
+	case DW_FORM_data2:
+	case DW_FORM_ref2:
+		*insn_ret = 2;
+		return NULL;
+	case DW_FORM_data4:
+	case DW_FORM_ref4:
+		*insn_ret = 4;
+		return NULL;
+	case DW_FORM_data8:
+	case DW_FORM_ref8:
+	case DW_FORM_ref_sig8:
+		*insn_ret = 8;
+		return NULL;
+	case DW_FORM_block1:
+		*insn_ret = ATTRIB_BLOCK1;
+		return NULL;
+	case DW_FORM_block2:
+		*insn_ret = ATTRIB_BLOCK2;
+		return NULL;
+	case DW_FORM_block4:
+		*insn_ret = ATTRIB_BLOCK4;
+		return NULL;
+	case DW_FORM_exprloc:
+		*insn_ret = ATTRIB_EXPRLOC;
+		return NULL;
+	case DW_FORM_sdata:
+	case DW_FORM_udata:
+	case DW_FORM_ref_udata:
+		*insn_ret = ATTRIB_LEB128;
+		return NULL;
+	case DW_FORM_ref_addr:
+	case DW_FORM_sec_offset:
+	case DW_FORM_strp:
+		*insn_ret = cu->is_64_bit ? 8 : 4;
+		return NULL;
+	case DW_FORM_string:
+		*insn_ret = ATTRIB_STRING;
+		return NULL;
+	case DW_FORM_flag_present:
+		*insn_ret = 0;
+		return NULL;
+	case DW_FORM_indirect:
+		*insn_ret = ATTRIB_INDIRECT;
+		return NULL;
+	default:
+		return binary_buffer_error(bb,
+					   "unknown attribute form %" PRIu64,
+					   form);
+	}
+}
+
+static struct drgn_error *dw_at_sibling_to_insn(struct binary_buffer *bb,
+						uint64_t form,
+						uint8_t *insn_ret)
+{
+	switch (form) {
+	case DW_FORM_ref1:
+		*insn_ret = ATTRIB_SIBLING_REF1;
+		return NULL;
+	case DW_FORM_ref2:
+		*insn_ret = ATTRIB_SIBLING_REF2;
+		return NULL;
+	case DW_FORM_ref4:
+		*insn_ret = ATTRIB_SIBLING_REF4;
+		return NULL;
+	case DW_FORM_ref8:
+		*insn_ret = ATTRIB_SIBLING_REF8;
+		return NULL;
+	case DW_FORM_ref_udata:
+		*insn_ret = ATTRIB_SIBLING_REF_UDATA;
+		return NULL;
+	case DW_FORM_indirect:
+		*insn_ret = ATTRIB_SIBLING_INDIRECT;
+		return NULL;
+	default:
+		return binary_buffer_error(bb,
+					   "unknown attribute form %" PRIu64 " for DW_AT_sibling",
+					   form);
+	}
+}
+
+static struct drgn_error *dw_at_name_to_insn(struct drgn_dwarf_index_cu *cu,
+					     struct binary_buffer *bb,
+					     uint64_t form, uint8_t *insn_ret)
+{
+	switch (form) {
+	case DW_FORM_strp:
+		if (!cu->module->scn_data[DRGN_SCN_DEBUG_STR]) {
+			return binary_buffer_error(bb,
+						   "DW_FORM_strp without .debug_str section");
+		}
+		if (cu->is_64_bit)
+			*insn_ret = ATTRIB_NAME_STRP8;
+		else
+			*insn_ret = ATTRIB_NAME_STRP4;
+		return NULL;
+	case DW_FORM_string:
+		*insn_ret = ATTRIB_NAME_STRING;
+		return NULL;
+	case DW_FORM_indirect:
+		*insn_ret = ATTRIB_NAME_INDIRECT;
+		return NULL;
+	default:
+		return binary_buffer_error(bb,
+					   "unknown attribute form %" PRIu64 " for DW_AT_name",
+					   form);
+	}
+}
+
+static struct drgn_error *
+dw_at_stmt_list_to_insn(struct drgn_dwarf_index_cu *cu,
+			struct binary_buffer *bb, uint64_t form,
+			uint8_t *insn_ret)
+{
+	switch (form) {
+	case DW_FORM_data4:
+		*insn_ret = ATTRIB_STMT_LIST_LINEPTR4;
+		return NULL;
+	case DW_FORM_data8:
+		*insn_ret = ATTRIB_STMT_LIST_LINEPTR8;
+		return NULL;
+	case DW_FORM_sec_offset:
+		if (cu->is_64_bit)
+			*insn_ret = ATTRIB_STMT_LIST_LINEPTR8;
+		else
+			*insn_ret = ATTRIB_STMT_LIST_LINEPTR4;
+		return NULL;
+	case DW_FORM_indirect:
+		*insn_ret = ATTRIB_STMT_LIST_INDIRECT;
+		return NULL;
+	default:
+		return binary_buffer_error(bb,
+					   "unknown attribute form %" PRIu64 " for DW_AT_stmt_list",
+					   form);
+	}
+}
+
+static struct drgn_error *dw_at_decl_file_to_insn(struct binary_buffer *bb,
+						  uint64_t form,
+						  uint8_t *insn_ret)
+{
+	switch (form) {
+	case DW_FORM_data1:
+		*insn_ret = ATTRIB_DECL_FILE_DATA1;
+		return NULL;
+	case DW_FORM_data2:
+		*insn_ret = ATTRIB_DECL_FILE_DATA2;
+		return NULL;
+	case DW_FORM_data4:
+		*insn_ret = ATTRIB_DECL_FILE_DATA4;
+		return NULL;
+	case DW_FORM_data8:
+		*insn_ret = ATTRIB_DECL_FILE_DATA8;
+		return NULL;
+		/*
+		 * decl_file must be positive, so if the compiler uses
+		 * DW_FORM_sdata for some reason, just treat it as udata.
+		 */
+	case DW_FORM_sdata:
+	case DW_FORM_udata:
+		*insn_ret = ATTRIB_DECL_FILE_UDATA;
+		return NULL;
+	case DW_FORM_indirect:
+		*insn_ret = ATTRIB_DECL_FILE_INDIRECT;
+		return NULL;
+	default:
+		return binary_buffer_error(bb,
+					   "unknown attribute form %" PRIu64 " for DW_AT_decl_file",
+					   form);
+	}
+}
+
+static struct drgn_error *
+dw_at_declaration_to_insn(struct binary_buffer *bb, uint64_t form,
+			  uint8_t *insn_ret, uint8_t *die_flags)
+{
+	switch (form) {
+	case DW_FORM_flag:
+		*insn_ret = ATTRIB_DECLARATION_FLAG;
+		return NULL;
+	case DW_FORM_flag_present:
+		/*
+		 * This could be an instruction, but as long as we have a free
+		 * DIE flag bit, we might as well use it.
+		 */
+		*insn_ret = 0;
+		*die_flags |= DIE_FLAG_DECLARATION;
+		return NULL;
+	case DW_FORM_indirect:
+		*insn_ret = ATTRIB_DECLARATION_INDIRECT;
+		return NULL;
+	default:
+		return binary_buffer_error(bb,
+					   "unknown attribute form %" PRIu64 " for DW_AT_declaration",
+					   form);
+	}
+}
+
+static struct drgn_error *
+dw_at_specification_to_insn(struct drgn_dwarf_index_cu *cu,
+			    struct binary_buffer *bb, uint64_t form,
+			    uint8_t *insn_ret)
+{
+	switch (form) {
+	case DW_FORM_ref1:
+		*insn_ret = ATTRIB_SPECIFICATION_REF1;
+		return NULL;
+	case DW_FORM_ref2:
+		*insn_ret = ATTRIB_SPECIFICATION_REF2;
+		return NULL;
+	case DW_FORM_ref4:
+		*insn_ret = ATTRIB_SPECIFICATION_REF4;
+		return NULL;
+	case DW_FORM_ref8:
+		*insn_ret = ATTRIB_SPECIFICATION_REF8;
+		return NULL;
+	case DW_FORM_ref_udata:
+		*insn_ret = ATTRIB_SPECIFICATION_REF_UDATA;
+		return NULL;
+	case DW_FORM_ref_addr:
+		if (cu->version >= 3) {
+			if (cu->is_64_bit)
+				*insn_ret = ATTRIB_SPECIFICATION_REF_ADDR8;
+			else
+				*insn_ret = ATTRIB_SPECIFICATION_REF_ADDR4;
+		} else {
+			if (cu->address_size == 8)
+				*insn_ret = ATTRIB_SPECIFICATION_REF_ADDR8;
+			else if (cu->address_size == 4)
+				*insn_ret = ATTRIB_SPECIFICATION_REF_ADDR4;
+			else
+				return binary_buffer_error(bb,
+							   "unsupported address size %" PRIu8 " for DW_FORM_ref_addr",
+							   cu->address_size);
+		}
+		return NULL;
+	case DW_FORM_indirect:
+		*insn_ret = ATTRIB_SPECIFICATION_INDIRECT;
+		return NULL;
+	default:
+		return binary_buffer_error(bb,
+					   "unknown attribute form %" PRIu64 " for DW_AT_specification",
+					   form);
+	}
 }
 
 static struct drgn_error *
@@ -302,221 +583,48 @@ read_abbrev_decl(struct drgn_debug_info_buffer *buffer,
 			break;
 
 		if (name == DW_AT_sibling) {
-			switch (form) {
-			case DW_FORM_ref1:
-				insn = ATTRIB_SIBLING_REF1;
-				goto append_insn;
-			case DW_FORM_ref2:
-				insn = ATTRIB_SIBLING_REF2;
-				goto append_insn;
-			case DW_FORM_ref4:
-				insn = ATTRIB_SIBLING_REF4;
-				goto append_insn;
-			case DW_FORM_ref8:
-				insn = ATTRIB_SIBLING_REF8;
-				goto append_insn;
-			case DW_FORM_ref_udata:
-				insn = ATTRIB_SIBLING_REF_UDATA;
-				goto append_insn;
-			default:
-				break;
-			}
+			err = dw_at_sibling_to_insn(&buffer->bb, form, &insn);
 		} else if (name == DW_AT_name && should_index) {
-			switch (form) {
-			case DW_FORM_strp:
-				if (!cu->module->scn_data[DRGN_SCN_DEBUG_STR]) {
-					return binary_buffer_error(&buffer->bb,
-								   "DW_FORM_strp without .debug_str section");
-				}
-				if (cu->is_64_bit)
-					insn = ATTRIB_NAME_STRP8;
-				else
-					insn = ATTRIB_NAME_STRP4;
-				goto append_insn;
-			case DW_FORM_string:
-				insn = ATTRIB_NAME_STRING;
-				goto append_insn;
-			default:
-				break;
+			err = dw_at_name_to_insn(cu, &buffer->bb, form, &insn);
+		} else if (name == DW_AT_stmt_list) {
+			if (!cu->module->scn_data[DRGN_SCN_DEBUG_LINE]) {
+				return binary_buffer_error(&buffer->bb,
+							   "DW_AT_stmt_list without .debug_line section");
 			}
-		} else if (name == DW_AT_stmt_list &&
-			   cu->module->scn_data[DRGN_SCN_DEBUG_LINE]) {
-			switch (form) {
-			case DW_FORM_data4:
-				insn = ATTRIB_STMT_LIST_LINEPTR4;
-				goto append_insn;
-			case DW_FORM_data8:
-				insn = ATTRIB_STMT_LIST_LINEPTR8;
-				goto append_insn;
-			case DW_FORM_sec_offset:
-				if (cu->is_64_bit)
-					insn = ATTRIB_STMT_LIST_LINEPTR8;
-				else
-					insn = ATTRIB_STMT_LIST_LINEPTR4;
-				goto append_insn;
-			default:
-				break;
-			}
+			err = dw_at_stmt_list_to_insn(cu, &buffer->bb, form,
+						      &insn);
 		} else if (name == DW_AT_decl_file && should_index &&
 			   /* Namespaces are merged, so we ignore their file. */
 			   tag != DW_TAG_namespace) {
-			switch (form) {
-			case DW_FORM_data1:
-				insn = ATTRIB_DECL_FILE_DATA1;
-				goto append_insn;
-			case DW_FORM_data2:
-				insn = ATTRIB_DECL_FILE_DATA2;
-				goto append_insn;
-			case DW_FORM_data4:
-				insn = ATTRIB_DECL_FILE_DATA4;
-				goto append_insn;
-			case DW_FORM_data8:
-				insn = ATTRIB_DECL_FILE_DATA8;
-				goto append_insn;
-			/*
-			 * decl_file must be positive, so if the compiler uses
-			 * DW_FORM_sdata for some reason, just treat it as
-			 * udata.
-			 */
-			case DW_FORM_sdata:
-			case DW_FORM_udata:
-				insn = ATTRIB_DECL_FILE_UDATA;
-				goto append_insn;
-			default:
-				break;
-			}
+			err = dw_at_decl_file_to_insn(&buffer->bb, form, &insn);
 		} else if (name == DW_AT_declaration && should_index) {
-			switch (form) {
-			case DW_FORM_flag:
-				insn = ATTRIB_DECLARATION_FLAG;
-				goto append_insn;
-			case DW_FORM_flag_present:
-				/*
-				 * This could be an instruction, but as long as
-				 * we have a free DIE flag bit, we might as well
-				 * use it.
-				 */
-				die_flags |= DIE_FLAG_DECLARATION;
-				break;
-			default:
-				return binary_buffer_error(&buffer->bb,
-							   "unknown attribute form %" PRIu64 " for DW_AT_declaration",
-							   form);
-			}
+			err = dw_at_declaration_to_insn(&buffer->bb, form,
+							&insn, &die_flags);
 		} else if (name == DW_AT_specification && should_index) {
-			switch (form) {
-			case DW_FORM_ref1:
-				insn = ATTRIB_SPECIFICATION_REF1;
-				goto append_insn;
-			case DW_FORM_ref2:
-				insn = ATTRIB_SPECIFICATION_REF2;
-				goto append_insn;
-			case DW_FORM_ref4:
-				insn = ATTRIB_SPECIFICATION_REF4;
-				goto append_insn;
-			case DW_FORM_ref8:
-				insn = ATTRIB_SPECIFICATION_REF8;
-				goto append_insn;
-			case DW_FORM_ref_udata:
-				insn = ATTRIB_SPECIFICATION_REF_UDATA;
-				goto append_insn;
-			case DW_FORM_ref_addr:
-				if (cu->version >= 3) {
-					if (cu->is_64_bit)
-						insn = ATTRIB_SPECIFICATION_REF_ADDR8;
-					else
-						insn = ATTRIB_SPECIFICATION_REF_ADDR4;
-				} else {
-					if (cu->address_size == 8)
-						insn = ATTRIB_SPECIFICATION_REF_ADDR8;
-					else if (cu->address_size == 4)
-						insn = ATTRIB_SPECIFICATION_REF_ADDR4;
-					else
-						return binary_buffer_error(&buffer->bb,
-									   "unsupported address size %" PRIu8 " for DW_FORM_ref_addr",
-									   cu->address_size);
+			err = dw_at_specification_to_insn(cu, &buffer->bb, form,
+							  &insn);
+		} else {
+			err = dw_form_to_insn(cu, &buffer->bb, form, &insn);
+		}
+		if (err)
+			return err;
+
+		if (insn != 0) {
+			if (!first && insn <= INSN_MAX_SKIP) {
+				uint8_t last_insn = insns->data[insns->size - 1];
+				if (last_insn + insn <= INSN_MAX_SKIP) {
+					insns->data[insns->size - 1] += insn;
+					continue;
+				} else if (last_insn < INSN_MAX_SKIP) {
+					insn = last_insn + insn - INSN_MAX_SKIP;
+					insns->data[insns->size - 1] = INSN_MAX_SKIP;
 				}
-				goto append_insn;
-			default:
-				return binary_buffer_error(&buffer->bb,
-							   "unknown attribute form %" PRIu64 " for DW_AT_specification",
-							   form);
 			}
-		}
 
-		switch (form) {
-		case DW_FORM_addr:
-			insn = cu->address_size;
-			break;
-		case DW_FORM_data1:
-		case DW_FORM_ref1:
-		case DW_FORM_flag:
-			insn = 1;
-			break;
-		case DW_FORM_data2:
-		case DW_FORM_ref2:
-			insn = 2;
-			break;
-		case DW_FORM_data4:
-		case DW_FORM_ref4:
-			insn = 4;
-			break;
-		case DW_FORM_data8:
-		case DW_FORM_ref8:
-		case DW_FORM_ref_sig8:
-			insn = 8;
-			break;
-		case DW_FORM_block1:
-			insn = ATTRIB_BLOCK1;
-			goto append_insn;
-		case DW_FORM_block2:
-			insn = ATTRIB_BLOCK2;
-			goto append_insn;
-		case DW_FORM_block4:
-			insn = ATTRIB_BLOCK4;
-			goto append_insn;
-		case DW_FORM_exprloc:
-			insn = ATTRIB_EXPRLOC;
-			goto append_insn;
-		case DW_FORM_sdata:
-		case DW_FORM_udata:
-		case DW_FORM_ref_udata:
-			insn = ATTRIB_LEB128;
-			goto append_insn;
-		case DW_FORM_ref_addr:
-		case DW_FORM_sec_offset:
-		case DW_FORM_strp:
-			insn = cu->is_64_bit ? 8 : 4;
-			break;
-		case DW_FORM_string:
-			insn = ATTRIB_STRING;
-			goto append_insn;
-		case DW_FORM_flag_present:
-			continue;
-		case DW_FORM_indirect:
-			return binary_buffer_error(&buffer->bb,
-						   "DW_FORM_indirect is not implemented");
-		default:
-			return binary_buffer_error(&buffer->bb,
-						   "unknown attribute form %" PRIu64,
-						   form);
+			if (!uint8_vector_append(insns, &insn))
+				return &drgn_enomem;
+			first = false;
 		}
-
-		if (!first) {
-			uint8_t last_insn = insns->data[insns->size - 1];
-			if (last_insn + insn <= INSN_MAX_SKIP) {
-				insns->data[insns->size - 1] += insn;
-				continue;
-			} else if (last_insn < INSN_MAX_SKIP) {
-				insn = last_insn + insn - INSN_MAX_SKIP;
-				insns->data[insns->size - 1] = INSN_MAX_SKIP;
-			}
-		}
-
-append_insn:
-		first = false;
-		if (!uint8_vector_append(insns, &insn))
-			return &drgn_enomem;
 	}
 	insn = 0;
 	if (!uint8_vector_append(insns, &insn) ||
@@ -583,6 +691,12 @@ static struct drgn_error *read_cu(struct drgn_dwarf_index_cu_buffer *buffer)
 
 	if ((err = binary_buffer_next_u8(&buffer->bb,
 					 &buffer->cu->address_size)))
+		return err;
+
+	/* Skip type_signature and type_offset for type units. */
+	if (buffer->cu->is_type_unit &&
+	    (err = binary_buffer_skip(&buffer->bb,
+				      buffer->cu->is_64_bit ? 16 : 12)))
 		return err;
 
 	return read_abbrev_table(buffer->cu, debug_abbrev_offset);
@@ -766,6 +880,35 @@ index_specification(struct drgn_dwarf_index *dindex, uintptr_t declaration,
 	return ret == -1 ? &drgn_enomem : NULL;
 }
 
+static struct drgn_error *read_indirect_insn(struct drgn_dwarf_index_cu *cu,
+					     struct binary_buffer *bb,
+					     uint8_t insn, uint8_t *insn_ret,
+					     uint8_t *die_flags)
+{
+	struct drgn_error *err;
+	uint64_t form;
+	if ((err = binary_buffer_next_uleb128(bb, &form)))
+		return err;
+	switch (insn) {
+	case ATTRIB_INDIRECT:
+		return dw_form_to_insn(cu, bb, form, insn_ret);
+	case ATTRIB_SIBLING_INDIRECT:
+		return dw_at_sibling_to_insn(bb, form, insn_ret);
+	case ATTRIB_NAME_INDIRECT:
+		return dw_at_name_to_insn(cu, bb, form, insn_ret);
+	case ATTRIB_STMT_LIST_INDIRECT:
+		return dw_at_stmt_list_to_insn(cu, bb, form, insn_ret);
+	case ATTRIB_DECL_FILE_INDIRECT:
+		return dw_at_decl_file_to_insn(bb, form, insn_ret);
+	case ATTRIB_DECLARATION_INDIRECT:
+		return dw_at_declaration_to_insn(bb, form, insn_ret, die_flags);
+	case ATTRIB_SPECIFICATION_INDIRECT:
+		return dw_at_specification_to_insn(cu, bb, form, insn_ret);
+	default:
+		UNREACHABLE();
+	}
+}
+
 /*
  * First pass: read the file name tables and index DIEs with
  * DW_AT_specification. This recurses into namespaces.
@@ -776,7 +919,8 @@ index_cu_first_pass(struct drgn_dwarf_index *dindex,
 {
 	struct drgn_error *err;
 	struct drgn_dwarf_index_cu *cu = buffer->cu;
-	Elf_Data *debug_info = cu->module->scn_data[DRGN_SCN_DEBUG_INFO];
+	Elf_Data *debug_info = cu->module->scn_data[
+		cu->is_type_unit ? DRGN_SCN_DEBUG_TYPES : DRGN_SCN_DEBUG_INFO];
 	const char *debug_info_buffer = debug_info->d_buf;
 	unsigned int depth = 0;
 	for (;;) {
@@ -803,7 +947,9 @@ index_cu_first_pass(struct drgn_dwarf_index *dindex,
 		uint64_t stmt_list;
 		const char *sibling = NULL;
 		uint8_t insn;
+		uint8_t extra_die_flags = 0;
 		while ((insn = *insnp++)) {
+indirect_insn:;
 			uint64_t skip, tmp;
 			switch (insn) {
 			case ATTRIB_BLOCK1:
@@ -946,6 +1092,21 @@ specification:
 specification_ref_addr:
 				specification = (uintptr_t)debug_info_buffer + tmp;
 				break;
+			case ATTRIB_INDIRECT:
+			case ATTRIB_SIBLING_INDIRECT:
+			case ATTRIB_NAME_INDIRECT:
+			case ATTRIB_STMT_LIST_INDIRECT:
+			case ATTRIB_DECL_FILE_INDIRECT:
+			case ATTRIB_DECLARATION_INDIRECT:
+			case ATTRIB_SPECIFICATION_INDIRECT:
+				if ((err = read_indirect_insn(cu, &buffer->bb,
+							      insn, &insn,
+							      &extra_die_flags)))
+					return err;
+				if (insn)
+					goto indirect_insn;
+				else
+					continue;
 			default:
 				skip = insn;
 skip:
@@ -955,7 +1116,7 @@ skip:
 				break;
 			}
 		}
-		insn = *insnp;
+		insn = *insnp | extra_die_flags;
 
 		if (depth == 0) {
 			if (stmt_list_ptr) {
@@ -997,71 +1158,62 @@ skip:
 	return NULL;
 }
 
-void drgn_dwarf_index_read_module(struct drgn_dwarf_index_update_state *state,
-				  struct drgn_debug_info_module *module)
+static struct drgn_error *
+drgn_dwarf_index_read_cus(struct drgn_dwarf_index_update_state *state,
+			  struct drgn_debug_info_module *module,
+			  enum drgn_debug_info_scn scn)
 {
+	struct drgn_dwarf_index_pending_cu_vector *cus =
+		&state->cus[omp_get_thread_num()];
+
 	struct drgn_error *err;
 	struct drgn_debug_info_buffer buffer;
-	drgn_debug_info_buffer_init(&buffer, module, DRGN_SCN_DEBUG_INFO);
+	drgn_debug_info_buffer_init(&buffer, module, scn);
 	while (binary_buffer_has_next(&buffer.bb)) {
-		const char *cu_buf = buffer.bb.pos;
+		struct drgn_dwarf_index_pending_cu *cu =
+			drgn_dwarf_index_pending_cu_vector_append_entry(cus);
+		if (!cu)
+			return &drgn_enomem;
+		cu->module = module;
+		cu->buf = buffer.bb.pos;
 		uint32_t unit_length32;
 		if ((err = binary_buffer_next_u32(&buffer.bb, &unit_length32)))
-			goto err;
-		bool is_64_bit = unit_length32 == UINT32_C(0xffffffff);
-		if (is_64_bit) {
+			return err;
+		cu->is_64_bit = unit_length32 == UINT32_C(0xffffffff);
+		if (cu->is_64_bit) {
 			uint64_t unit_length64;
 			if ((err = binary_buffer_next_u64(&buffer.bb,
 							  &unit_length64)))
-				goto err;
+				return err;
 			if (unit_length64 > SIZE_MAX) {
-				err = binary_buffer_error(&buffer.bb,
-							  "unit length is too large");
-				goto err;
+				return binary_buffer_error(&buffer.bb,
+							   "unit length is too large");
 			}
 			if ((err = binary_buffer_skip(&buffer.bb,
 						      unit_length64)))
-				goto err;
+				return err;
 		} else {
 			if ((err = binary_buffer_skip(&buffer.bb,
 						      unit_length32)))
-				goto err;
+				return err;
 		}
-		size_t cu_len = buffer.bb.pos - cu_buf;
-
-		#pragma omp task
-		{
-			struct drgn_dwarf_index_cu cu = {
-				.module = module,
-				.buf = cu_buf,
-				.len = cu_len,
-				.is_64_bit = is_64_bit,
-			};
-			struct drgn_dwarf_index_cu_buffer cu_buffer;
-			drgn_dwarf_index_cu_buffer_init(&cu_buffer, &cu);
-			struct drgn_error *cu_err = read_cu(&cu_buffer);
-			if (cu_err)
-				goto cu_err;
-
-			cu_err = index_cu_first_pass(state->dindex, &cu_buffer);
-			if (cu_err)
-				goto cu_err;
-
-			#pragma omp critical(drgn_dwarf_index_cus)
-			if (!drgn_dwarf_index_cu_vector_append(&state->dindex->cus,
-							       &cu))
-				cu_err = &drgn_enomem;
-			if (cu_err) {
-cu_err:
-				drgn_dwarf_index_cu_deinit(&cu);
-				drgn_dwarf_index_update_cancel(state, cu_err);
-			}
-		}
+		cu->len = buffer.bb.pos - cu->buf;
+		cu->scn = scn;
 	}
-	return;
+	return NULL;
+}
 
-err:
-	drgn_dwarf_index_update_cancel(state, err);
+struct drgn_error *
+drgn_dwarf_index_read_module(struct drgn_dwarf_index_update_state *state,
+			     struct drgn_debug_info_module *module)
+{
+	struct drgn_error *err;
+	err = drgn_dwarf_index_read_cus(state, module, DRGN_SCN_DEBUG_INFO);
+	if (!err && module->scn_data[DRGN_SCN_DEBUG_TYPES]) {
+		err = drgn_dwarf_index_read_cus(state, module,
+						DRGN_SCN_DEBUG_TYPES);
+	}
+	return err;
 }
 
 bool
@@ -1225,7 +1377,9 @@ index_cu_second_pass(struct drgn_dwarf_index_namespace *ns,
 		bool specification = false;
 		const char *sibling = NULL;
 		uint8_t insn;
+		uint8_t extra_die_flags = 0;
 		while ((insn = *insnp++)) {
+indirect_insn:;
 			uint64_t skip, tmp;
 			switch (insn) {
 			case ATTRIB_BLOCK1:
@@ -1377,6 +1531,21 @@ strp:
 				specification = true;
 				skip = 8;
 				goto skip;
+			case ATTRIB_INDIRECT:
+			case ATTRIB_SIBLING_INDIRECT:
+			case ATTRIB_NAME_INDIRECT:
+			case ATTRIB_STMT_LIST_INDIRECT:
+			case ATTRIB_DECL_FILE_INDIRECT:
+			case ATTRIB_DECLARATION_INDIRECT:
+			case ATTRIB_SPECIFICATION_INDIRECT:
+				if ((err = read_indirect_insn(cu, &buffer->bb,
+							      insn, &insn,
+							      &extra_die_flags)))
+					return err;
+				if (insn)
+					goto indirect_insn;
+				else
+					continue;
 			default:
 				skip = insn;
 skip:
@@ -1386,7 +1555,7 @@ skip:
 				break;
 			}
 		}
-		insn = *insnp;
+		insn = *insnp | extra_die_flags;
 
 		uint8_t tag = insn & DIE_FLAG_TAG_MASK;
 		if (depth == 1) {
@@ -1517,37 +1686,81 @@ static void drgn_dwarf_index_rollback(struct drgn_dwarf_index *dindex)
 }
 
 struct drgn_error *
-drgn_dwarf_index_update_end(struct drgn_dwarf_index_update_state *state)
+drgn_dwarf_index_update(struct drgn_dwarf_index_update_state *state)
 {
 	struct drgn_dwarf_index *dindex = state->dindex;
 
-	if (state->err)
+	size_t old_cus_size = dindex->cus.size;
+	size_t new_cus_size = old_cus_size;
+	for (size_t i = 0; i < state->max_threads; i++)
+		new_cus_size += state->cus[i].size;
+	if (!drgn_dwarf_index_cu_vector_reserve(&dindex->cus, new_cus_size))
+		return &drgn_enomem;
+	for (size_t i = 0; i < state->max_threads; i++) {
+		for (size_t j = 0; j < state->cus[i].size; j++) {
+			struct drgn_dwarf_index_pending_cu *pending_cu =
+				&state->cus[i].data[j];
+			dindex->cus.data[dindex->cus.size++] = (struct drgn_dwarf_index_cu){
+				.module = pending_cu->module,
+				.buf = pending_cu->buf,
+				.len = pending_cu->len,
+				.is_64_bit = pending_cu->is_64_bit,
+				.is_type_unit =
+					pending_cu->scn == DRGN_SCN_DEBUG_TYPES,
+			};
+		}
+	}
+
+	struct drgn_error *err = NULL;
+	#pragma omp parallel for schedule(dynamic)
+	for (size_t i = old_cus_size; i < dindex->cus.size; i++) {
+		if (err)
+			continue;
+		struct drgn_dwarf_index_cu *cu = &dindex->cus.data[i];
+		struct drgn_dwarf_index_cu_buffer cu_buffer;
+		drgn_dwarf_index_cu_buffer_init(&cu_buffer, cu);
+		struct drgn_error *cu_err = read_cu(&cu_buffer);
+		if (!cu_err)
+			cu_err = index_cu_first_pass(state->dindex, &cu_buffer);
+		if (cu_err) {
+			#pragma omp critical(drgn_dwarf_index_update_end_error)
+			if (err)
+				drgn_error_destroy(cu_err);
+			else
+				err = cu_err;
+		}
+	}
+	if (err)
 		goto err;
 
 	#pragma omp parallel for schedule(dynamic)
-	for (size_t i = state->old_cus_size; i < dindex->cus.size; i++) {
-		if (drgn_dwarf_index_update_cancelled(state))
+	for (size_t i = old_cus_size; i < dindex->cus.size; i++) {
+		if (err)
 			continue;
 		struct drgn_dwarf_index_cu *cu = &dindex->cus.data[i];
 		struct drgn_dwarf_index_cu_buffer buffer;
 		drgn_dwarf_index_cu_buffer_init(&buffer, cu);
 		buffer.bb.pos += cu->is_64_bit ? 23 : 11;
+		if (cu->is_type_unit)
+			buffer.bb.pos += cu->is_64_bit ? 16 : 12;
 		struct drgn_error *cu_err =
 			index_cu_second_pass(&dindex->global, &buffer);
-		if (cu_err)
-			drgn_dwarf_index_update_cancel(state, cu_err);
+		if (cu_err) {
+			#pragma omp critical(drgn_dwarf_index_update_end_error)
+			if (err)
+				drgn_error_destroy(cu_err);
+			else
+				err = cu_err;
+		}
 	}
-	if (state->err) {
-		drgn_dwarf_index_rollback(state->dindex);
-		goto err;
-	}
-	return NULL;
-
+	if (err) {
+		drgn_dwarf_index_rollback(dindex);
 err:
-	for (size_t i = state->old_cus_size; i < dindex->cus.size; i++)
-		drgn_dwarf_index_cu_deinit(&dindex->cus.data[i]);
-	dindex->cus.size = state->old_cus_size;
-	return state->err;
+		for (size_t i = old_cus_size; i < dindex->cus.size; i++)
+			drgn_dwarf_index_cu_deinit(&dindex->cus.data[i]);
+		dindex->cus.size = old_cus_size;
+	}
+	return err;
 }
 
 static struct drgn_error *index_namespace(struct drgn_dwarf_index_namespace *ns)
@@ -1692,7 +1905,14 @@ struct drgn_error *drgn_dwarf_index_get_die(struct drgn_dwarf_index_die *die,
 		return drgn_error_libdwfl();
 	uintptr_t start =
 		(uintptr_t)die->module->scn_data[DRGN_SCN_DEBUG_INFO]->d_buf;
-	if (!dwarf_offdie(dwarf, die->addr - start, die_ret))
-		return drgn_error_libdw();
+	size_t size = die->module->scn_data[DRGN_SCN_DEBUG_INFO]->d_size;
+	if (die->addr >= start && die->addr < start + size) {
+		if (!dwarf_offdie(dwarf, die->addr - start, die_ret))
+			return drgn_error_libdw();
+	} else {
+		start = (uintptr_t)die->module->scn_data[DRGN_SCN_DEBUG_TYPES]->d_buf;
+		if (!dwarf_offdie_types(dwarf, die->addr - start, die_ret))
+			return drgn_error_libdw();
+	}
 	return NULL;
 }

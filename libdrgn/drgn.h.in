@@ -497,7 +497,8 @@ typedef struct drgn_error *(*drgn_memory_read_fn)(void *buf, uint64_t address,
  * Register a segment of memory in a @ref drgn_program.
  *
  * If the segment overlaps a previously registered segment, the new segment
- * takes precedence.
+ * takes precedence. If any part of the segment is beyond the maximum address,
+ * that part is ignored.
  *
  * @param[in] address Address of the segment.
  * @param[in] size Size of the segment in bytes.
@@ -2608,6 +2609,42 @@ struct drgn_error *drgn_format_stack_trace(struct drgn_stack_trace *trace,
 bool drgn_stack_frame_interrupted(struct drgn_stack_trace *trace, size_t frame);
 
 /**
+ * Format a stack frame as a string.
+ *
+ * @param[out] ret Returned string. On success, it must be freed with @c free().
+ * On error, its contents are undefined.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *drgn_format_stack_frame(struct drgn_stack_trace *trace,
+					   size_t frame, char **ret);
+
+/**
+ * Get the name of the function at a stack frame.
+ *
+ * @return Function name. This is valid until the stack trace is destroyed; it
+ * should not be freed. @c NULL if the name could not be determined.
+ */
+const char *drgn_stack_frame_name(struct drgn_stack_trace *trace, size_t frame);
+
+/** Return whether a stack frame is for an inlined call. */
+bool drgn_stack_frame_is_inline(struct drgn_stack_trace *trace, size_t frame);
+
+/**
+ * Get the source code location of a stack frame.
+ *
+ * @param[out] line_ret Returned line number. Returned as 0 if unknown. May be
+ * @c NULL if not needed.
+ * @param[out] column_ret Returned column number. Returned as 0 if unknown. May
+ * be @c NULL if not needed.
+ * @return Filename. This is valid until the stack trace is destroyed; it should
+ * not be freed. @c NULL if the location could not be determined (in which case
+ * `*line_ret` and `*column_ret` are undefined).
+ */
+const char *drgn_stack_frame_source(struct drgn_stack_trace *trace,
+				    size_t frame, int *line_ret,
+				    int *column_ret);
+
+/**
  * Get the program counter at a stack frame.
  *
  * @param[out] ret Returned program counter.
@@ -2626,6 +2663,19 @@ bool drgn_stack_frame_pc(struct drgn_stack_trace *trace, size_t frame,
 struct drgn_error *drgn_stack_frame_symbol(struct drgn_stack_trace *trace,
 					   size_t frame,
 					   struct drgn_symbol **ret);
+
+/**
+ * Find an object in the scope of a stack frame.
+ *
+ * @param[in] name Object name.
+ * @param[out] ret Returned object. This must have already been initialized with
+ * @ref drgn_object_init().
+ * @return @c NULL on success, non-@c NULL on error.
+ */
+struct drgn_error *
+drgn_stack_frame_find_object(struct drgn_stack_trace *trace, size_t frame,
+			     const char *name, struct drgn_object *ret);
+
 /**
  * Get the value of a register in a stack frame.
  *
