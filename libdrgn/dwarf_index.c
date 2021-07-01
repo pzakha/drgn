@@ -40,10 +40,10 @@ DEFINE_VECTOR_FUNCTIONS(drgn_dwarf_index_pending_cu_vector)
  */
 enum {
 	INSN_MAX_SKIP = 215,
+	ATTRIB_BLOCK,
 	ATTRIB_BLOCK1,
 	ATTRIB_BLOCK2,
 	ATTRIB_BLOCK4,
-	ATTRIB_EXPRLOC,
 	ATTRIB_LEB128,
 	ATTRIB_STRING,
 	ATTRIB_SIBLING_REF1,
@@ -281,6 +281,10 @@ static struct drgn_error *dw_form_to_insn(struct drgn_dwarf_index_cu *cu,
 	case DW_FORM_ref_sig8:
 		*insn_ret = 8;
 		return NULL;
+	case DW_FORM_block:
+	case DW_FORM_exprloc:
+		*insn_ret = ATTRIB_BLOCK;
+		return NULL;
 	case DW_FORM_block1:
 		*insn_ret = ATTRIB_BLOCK1;
 		return NULL;
@@ -290,15 +294,17 @@ static struct drgn_error *dw_form_to_insn(struct drgn_dwarf_index_cu *cu,
 	case DW_FORM_block4:
 		*insn_ret = ATTRIB_BLOCK4;
 		return NULL;
-	case DW_FORM_exprloc:
-		*insn_ret = ATTRIB_EXPRLOC;
-		return NULL;
 	case DW_FORM_sdata:
 	case DW_FORM_udata:
 	case DW_FORM_ref_udata:
 		*insn_ret = ATTRIB_LEB128;
 		return NULL;
 	case DW_FORM_ref_addr:
+		if (cu->version < 3) {
+			*insn_ret = cu->address_size;
+			return NULL;
+		}
+		/* fallthrough */
 	case DW_FORM_sec_offset:
 	case DW_FORM_strp:
 		*insn_ret = cu->is_64_bit ? 8 : 4;
@@ -727,6 +733,11 @@ static struct drgn_error *read_cu(struct drgn_dwarf_index_cu_buffer *buffer)
 	if ((err = binary_buffer_next_u8(&buffer->bb,
 					 &buffer->cu->address_size)))
 		return err;
+	if (buffer->cu->address_size > 8) {
+		return binary_buffer_error(&buffer->bb,
+					   "unsupported address size %" PRIu8,
+					   buffer->cu->address_size);
+	}
 
 	/* Skip type_signature and type_offset for type units. */
 	if (buffer->cu->is_type_unit &&
@@ -1014,10 +1025,8 @@ static struct drgn_error *read_file_name_table(struct path_hash_cache *cache,
 		struct path_hash_chunk *prev_chunk = cache->current_chunk;
 		path_hash = hash_path(cache, path,
 				      cache->directories.data[directory_index]);
-		if (!path_hash)
-			goto err;
-
-		if (!uint64_vector_append(&file_name_hashes, &path_hash->hash)) {
+		if (!path_hash ||
+		    !uint64_vector_append(&file_name_hashes, &path_hash->hash)) {
 			err = &drgn_enomem;
 			goto err;
 		}
@@ -1137,6 +1146,11 @@ index_cu_first_pass(struct drgn_dwarf_index *dindex,
 indirect_insn:;
 			uint64_t skip, tmp;
 			switch (insn) {
+			case ATTRIB_BLOCK:
+				if ((err = binary_buffer_next_uleb128(&buffer->bb,
+								      &skip)))
+					return err;
+				goto skip;
 			case ATTRIB_BLOCK1:
 				if ((err = binary_buffer_next_u8_into_u64(&buffer->bb,
 									  &skip)))
@@ -1150,11 +1164,6 @@ indirect_insn:;
 			case ATTRIB_BLOCK4:
 				if ((err = binary_buffer_next_u32_into_u64(&buffer->bb,
 									   &skip)))
-					return err;
-				goto skip;
-			case ATTRIB_EXPRLOC:
-				if ((err = binary_buffer_next_uleb128(&buffer->bb,
-								      &skip)))
 					return err;
 				goto skip;
 			case ATTRIB_LEB128:
@@ -1388,13 +1397,8 @@ drgn_dwarf_index_read_cus(struct drgn_dwarf_index_update_state *state,
 		if (cu->is_64_bit) {
 			uint64_t unit_length64;
 			if ((err = binary_buffer_next_u64(&buffer.bb,
-							  &unit_length64)))
-				return err;
-			if (unit_length64 > SIZE_MAX) {
-				return binary_buffer_error(&buffer.bb,
-							   "unit length is too large");
-			}
-			if ((err = binary_buffer_skip(&buffer.bb,
+							  &unit_length64)) ||
+			    (err = binary_buffer_skip(&buffer.bb,
 						      unit_length64)))
 				return err;
 		} else {
@@ -1587,6 +1591,11 @@ index_cu_second_pass(struct drgn_dwarf_index_namespace *ns,
 indirect_insn:;
 			uint64_t skip, tmp;
 			switch (insn) {
+			case ATTRIB_BLOCK:
+				if ((err = binary_buffer_next_uleb128(&buffer->bb,
+								      &skip)))
+					return err;
+				goto skip;
 			case ATTRIB_BLOCK1:
 				if ((err = binary_buffer_next_u8_into_u64(&buffer->bb,
 									  &skip)))
@@ -1600,11 +1609,6 @@ indirect_insn:;
 			case ATTRIB_BLOCK4:
 				if ((err = binary_buffer_next_u32_into_u64(&buffer->bb,
 									   &skip)))
-					return err;
-				goto skip;
-			case ATTRIB_EXPRLOC:
-				if ((err = binary_buffer_next_uleb128(&buffer->bb,
-								      &skip)))
 					return err;
 				goto skip;
 			case ATTRIB_SPECIFICATION_REF_UDATA:
