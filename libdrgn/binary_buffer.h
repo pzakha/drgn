@@ -14,9 +14,9 @@
 
 #include <assert.h>
 #include <byteswap.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <string.h>
 
 #include "util.h"
@@ -138,11 +138,11 @@ static inline bool binary_buffer_has_next(struct binary_buffer *bb)
 }
 
 static inline struct drgn_error *
-binary_buffer_check_bounds(struct binary_buffer *bb, size_t n)
+binary_buffer_check_bounds(struct binary_buffer *bb, uint64_t n)
 {
 	if (unlikely(bb->end - bb->pos < n)) {
 		return binary_buffer_error_at(bb, bb->pos,
-					      "expected at least %zu byte%s, have %td",
+					      "expected at least %" PRIu64 " byte%s, have %td",
 					      n, n == 1 ? "" : "s",
 					      bb->end - bb->pos);
 	}
@@ -151,7 +151,7 @@ binary_buffer_check_bounds(struct binary_buffer *bb, size_t n)
 
 /** Advance the current buffer position by @p n bytes. */
 static inline struct drgn_error *binary_buffer_skip(struct binary_buffer *bb,
-						    size_t n)
+						    uint64_t n)
 {
 	struct drgn_error *err;
 	if ((err = binary_buffer_check_bounds(bb, n)))
@@ -347,59 +347,102 @@ binary_buffer_next_sint(struct binary_buffer *bb, size_t size, int64_t *ret)
 static inline struct drgn_error *
 binary_buffer_next_uleb128(struct binary_buffer *bb, uint64_t *ret)
 {
-	int shift = 0;
 	uint64_t value = 0;
 	const char *pos = bb->pos;
-	while (likely(pos < bb->end)) {
-		uint8_t byte = *(uint8_t *)(pos++);
-		if (unlikely(shift == 63 && byte > 1)) {
+	uint8_t byte;
+	/* No overflow possible for the first 9 bytes. */
+	for (int shift = 0; shift < 63; shift += 7) {
+		if (unlikely(pos >= bb->end)) {
+oob:
 			return binary_buffer_error_at(bb, bb->pos,
-						      "ULEB128 number overflows unsigned 64-bit integer");
+						      "expected ULEB128 number");
 		}
+		byte = *(uint8_t *)(pos++);
 		value |= (uint64_t)(byte & 0x7f) << shift;
-		shift += 7;
 		if (!(byte & 0x80)) {
+done:
 			bb->prev = bb->pos;
 			bb->pos = pos;
 			*ret = value;
 			return NULL;
 		}
 	}
-	return binary_buffer_error_at(bb, bb->pos, "expected ULEB128 number");
+	/* The 10th byte must be 0 or 1. */
+	if (unlikely(pos >= bb->end))
+		goto oob;
+	byte = *(uint8_t *)(pos++);
+	if (byte & 0x7e) {
+overflow:
+		return binary_buffer_error_at(bb, bb->pos,
+					      "ULEB128 number overflows unsigned 64-bit integer");
+	}
+	value |= (uint64_t)byte << 63;
+	/* Any remaining bytes must be 0. */
+	while (byte & 0x80) {
+		if (unlikely(pos >= bb->end))
+			goto oob;
+		byte = *(uint8_t *)(pos++);
+		if (byte & 0x7f)
+			goto overflow;
+	}
+	goto done;
 }
 
 /**
  * Decode a Signed Little-Endian Base 128 (SLEB128) number at the current buffer
  * position and advance the position.
  *
- * If the number does not fit in a @c int64_t, an error is returned.
+ * If the number does not fit in an @c int64_t, an error is returned.
  *
  * @param[out] ret Returned value.
  */
 static inline struct drgn_error *
 binary_buffer_next_sleb128(struct binary_buffer *bb, int64_t *ret)
 {
-	int shift = 0;
-	int64_t value = 0;
+	uint64_t value = 0;
 	const char *pos = bb->pos;
-	while (likely(pos < bb->end)) {
-		uint8_t byte = *(uint8_t *)(pos++);
-		if (unlikely(shift == 63 && byte != 0 && byte != 0x7f)) {
+	uint8_t byte;
+	/* No overflow possible for the first 9 bytes. */
+	for (int shift = 0; shift < 63; shift += 7) {
+		if (unlikely(pos >= bb->end)) {
+oob:
 			return binary_buffer_error_at(bb, bb->pos,
-						      "SLEB128 number overflows signed 64-bit integer");
+						      "expected SLEB128 number");
 		}
+		byte = *(uint8_t *)(pos++);
 		value |= (uint64_t)(byte & 0x7f) << shift;
-		shift += 7;
 		if (!(byte & 0x80)) {
+			if (byte & 0x40)
+				value |= ~(UINT64_C(1) << (shift + 7)) + 1;
+done:
 			bb->prev = bb->pos;
 			bb->pos = pos;
-			if (shift < 64 && (byte & 0x40))
-				value |= ~(UINT64_C(1) << shift) + 1;
 			*ret = value;
 			return NULL;
 		}
 	}
-	return binary_buffer_error_at(bb, bb->pos, "expected SLEB128 number");
+	/*
+	 * The least significant bit of the 10th byte must be the sign bit, and
+	 * any other bits must match it (sign extension).
+	 */
+	if (unlikely(pos >= bb->end))
+		goto oob;
+	byte = *(uint8_t *)(pos++);
+	uint8_t sign = byte & 0x7f;
+	if (sign != 0 && sign != 0x7f) {
+overflow:
+		return binary_buffer_error_at(bb, bb->pos,
+					      "SLEB128 number overflows signed 64-bit integer");
+	}
+	value |= (uint64_t)byte << 63;
+	while (byte & 0x80) {
+		if (unlikely(pos >= bb->end))
+			goto oob;
+		byte = *(uint8_t *)(pos++);
+		if ((byte & 0x7f) != sign)
+			goto overflow;
+	}
+	goto done;
 }
 
 /**

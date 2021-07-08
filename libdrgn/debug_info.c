@@ -360,16 +360,9 @@ drgn_debug_info_module_find_dwarf_scopes(struct drgn_debug_info_module *module,
 	struct drgn_dwarf_die_iterator it;
 	bool children;
 	size_t subtree;
-	if (naranges > 0) {
-		Dwarf_Off offset;
-		if (dwarf_getarangeinfo(dwarf_getarange_addr(aranges, pc), NULL,
-					NULL, &offset) < 0) {
-			/* No ranges match the PC. */
-			*dies_ret = NULL;
-			*length_ret = 0;
-			return NULL;
-		}
-
+	Dwarf_Off offset;
+	if (dwarf_getarangeinfo(dwarf_getarange_addr(aranges, pc), NULL, NULL,
+				&offset) >= 0) {
 		drgn_dwarf_die_iterator_init(&it, dwarf);
 		Dwarf_Die *cu_die = dwarf_die_vector_append_entry(&it.dies);
 		if (!cu_die) {
@@ -393,8 +386,8 @@ drgn_debug_info_module_find_dwarf_scopes(struct drgn_debug_info_module *module,
 		subtree = 1;
 	} else {
 		/*
-		 * .debug_aranges is empty or missing. Fall back to checking
-		 * each CU.
+		 * Range was not found. .debug_aranges could be missing or
+		 * incomplete, so fall back to checking each CU.
 		 */
 		drgn_dwarf_die_iterator_init(&it, dwarf);
 		children = false;
@@ -644,6 +637,30 @@ drgn_debug_info_module_finish_indexing(struct drgn_debug_info *dbinfo,
 	}
 }
 
+/*
+ * Wrapper around dwfl_report_end() that works around a libdwfl bug which causes
+ * it to close stdin when it frees some modules that were reported by
+ * dwfl_core_file_report(). This was fixed in elfutils 0.177 by commit
+ * d37f6ea7e3e5 ("libdwfl: Fix fd leak/closing wrong fd after
+ * dwfl_core_file_report()"), but we support older versions.
+ */
+static int my_dwfl_report_end(struct drgn_debug_info *dbinfo,
+			      int (*removed)(Dwfl_Module *, void *,
+					     const char *, Dwarf_Addr, void *),
+			      void *arg)
+{
+	int fd = -1;
+	if ((dbinfo->prog->flags
+	     & (DRGN_PROGRAM_IS_LINUX_KERNEL | DRGN_PROGRAM_IS_LIVE)) == 0)
+		fd = dup(0);
+	int ret = dwfl_report_end(dbinfo->dwfl, removed, arg);
+	if (fd != -1) {
+		dup2(fd, 0);
+		close(fd);
+	}
+	return ret;
+}
+
 struct drgn_dwfl_module_removed_arg {
 	struct drgn_debug_info *dbinfo;
 	bool finish_indexing;
@@ -727,7 +744,7 @@ static void drgn_debug_info_free_modules(struct drgn_debug_info *dbinfo,
 		.finish_indexing = finish_indexing,
 		.free_all = free_all,
 	};
-	dwfl_report_end(dbinfo->dwfl, drgn_dwfl_module_removed, &arg);
+	my_dwfl_report_end(dbinfo, drgn_dwfl_module_removed, &arg);
 }
 
 struct drgn_error *
@@ -1412,7 +1429,7 @@ struct drgn_error *
 drgn_debug_info_report_flush(struct drgn_debug_info_load_state *load)
 {
 	struct drgn_debug_info *dbinfo = load->dbinfo;
-	dwfl_report_end(dbinfo->dwfl, NULL, NULL);
+	my_dwfl_report_end(dbinfo, NULL, NULL);
 	struct drgn_error *err = drgn_debug_info_update_index(load);
 	dwfl_report_begin_add(dbinfo->dwfl);
 	if (err)
@@ -1464,7 +1481,7 @@ struct drgn_error *drgn_debug_info_load(struct drgn_debug_info *dbinfo,
 		err = linux_kernel_report_debug_info(&load);
 	else
 		err = userspace_report_debug_info(&load);
-	dwfl_report_end(dbinfo->dwfl, NULL, NULL);
+	my_dwfl_report_end(dbinfo, NULL, NULL);
 	if (err)
 		goto err;
 
@@ -4588,10 +4605,8 @@ unknown_augmentation:
 						   segment_selector_size);
 		}
 	} else {
-		if (module->platform.flags & DRGN_PLATFORM_IS_64_BIT)
-			cie->address_size = 8;
-		else
-			cie->address_size = 4;
+		cie->address_size =
+			drgn_platform_address_size(&module->platform);
 	}
 	if ((err = binary_buffer_next_uleb128(&buffer.bb,
 					      &cie->code_alignment_factor)) ||
